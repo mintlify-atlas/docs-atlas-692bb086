@@ -1,0 +1,115 @@
+{
+  "projectType": "api-service",
+  "projectName": "GaiterGuard",
+  "projectDescription": "An intercepting API gateway that enforces human-in-the-loop authorization for autonomous AI agents, ensuring agents never hold production credentials and high-impact actions require explicit human approval.",
+  "theme": "aspen",
+  "primaryColor": "#3B82F6",
+  "lightColor": "#60A5FA",
+  "darkColor": "#1E40AF",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/security-model",
+              "concepts/risk-assessment",
+              "concepts/approval-flow"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/deployment",
+              "guides/configuration",
+              "guides/agent-integration",
+              "guides/agent-skill"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Authentication",
+            "pages": [
+              "api/authentication/overview",
+              "api/authentication/agent-keys",
+              "api/authentication/jwt-auth"
+            ]
+          },
+          {
+            "group": "Agent Endpoints",
+            "pages": [
+              "api/agent/proxy",
+              "api/agent/status",
+              "api/agent/execute"
+            ]
+          },
+          {
+            "group": "Dashboard Endpoints",
+            "pages": [
+              "api/dashboard/auth",
+              "api/dashboard/services",
+              "api/dashboard/agents",
+              "api/dashboard/approvals"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "api/reference/errors",
+              "api/reference/headers",
+              "api/reference/idempotency"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Encrypted secret vault (AES-256-GCM) - credentials never exposed to agents",
+    "Agent-Key authentication with service-level scoping",
+    "LLM-based risk assessment for automatic request evaluation",
+    "Human-in-the-loop approval queue for high-risk actions",
+    "Transparent API proxying with credential injection",
+    "Intent integrity checking to detect payload mismatches",
+    "Global kill switch for instant agent session blocking",
+    "Idempotency support with automatic request deduplication",
+    "TTL-based cleanup for approved-but-unexecuted requests"
+  ],
+  "publicApiSurface": [
+    "POST /proxy - Submit agent request for proxying",
+    "GET /status/:actionId - Poll approval status",
+    "POST /proxy/execute/:actionId - Execute approved request",
+    "POST /auth/register - Register new user",
+    "POST /auth/login - Authenticate user",
+    "POST /auth/refresh - Refresh access token",
+    "GET /auth/me - Get current user",
+    "GET /services - List registered services",
+    "POST /services - Register new service",
+    "PUT /services/:id - Update service",
+    "DELETE /services/:id - Delete service",
+    "POST /services/:id/credentials - Store/update service credentials",
+    "GET /agents - List agents",
+    "POST /agents - Create agent",
+    "PUT /agents/:id - Update agent",
+    "DELETE /agents/:id - Delete agent",
+    "PUT /agents/:id/services - Update agent service scope",
+    "GET /approvals/pending - List pending approvals",
+    "PATCH /approvals/:actionId/approve - Approve action",
+    "PATCH /approvals/:actionId/deny - Deny action"
+  ]
+}
