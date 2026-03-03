@@ -1,0 +1,562 @@
+---
+title: "Installation"
+description: "Deploy GaiterGuard with Docker or run locally for development"
+---
+
+## Deployment options
+
+GaiterGuard supports two installation modes:
+
+<CardGroup cols={2}>
+  <Card title="Docker (recommended)" icon="docker">
+    Production-ready deployment with PostgreSQL, backend, and frontend in containers.
+  </Card>
+  
+  <Card title="Local development" icon="code">
+    Run backend and frontend with hot reload for active development and testing.
+  </Card>
+</CardGroup>
+
+---
+
+## Docker installation
+
+**Prerequisites**: Docker 20.10+ and Docker Compose 2.0+
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/your-username/gaiter-guard.git
+cd gaiter-guard
+```
+
+### 2. Configure environment variables
+
+Copy the example environment file:
+
+```bash
+cp backend/.env.example backend/.env
+```
+
+Edit `backend/.env` with your production values:
+
+<CodeGroup>
+```env Database
+DATABASE_URL=postgres://pglocal:pglocal-pass@db:5432/gaiterguard
+```
+
+```env Server
+PORT=3000
+NODE_ENV=production
+```
+
+```env JWT Authentication
+JWT_SECRET=your-secret-here-use-a-long-random-string
+JWT_ACCESS_EXPIRY=15m
+JWT_REFRESH_EXPIRY=7d
+```
+
+```env Encryption
+ENCRYPTION_SECRET=minimum-32-characters-for-aes256-encryption
+ENCRYPTION_SALT=gaiter-guard-salt-v1
+```
+
+```env LLM Risk Assessment
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_API_KEY=sk-your-openai-api-key-here
+LLM_MODEL=gpt-4o-mini
+LLM_TIMEOUT_MS=10000
+```
+
+```env Risk Thresholds
+RISK_THRESHOLD=0.5
+APPROVAL_EXECUTE_TTL_HOURS=1
+```
+</CodeGroup>
+
+<Warning>
+**Security best practices**:
+- Use `openssl rand -hex 32` to generate `JWT_SECRET` and `ENCRYPTION_SECRET`
+- Set `ENCRYPTION_SECRET` to at least 32 characters for AES-256-GCM
+- Never commit `.env` files to version control
+- Rotate secrets regularly in production
+</Warning>
+
+### 3. Start all services
+
+Launch the full stack with Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+For detached mode (runs in background):
+
+```bash
+docker compose up --build -d
+```
+
+### 4. Verify services
+
+Check that all containers are healthy:
+
+<CodeGroup>
+```bash Check status
+docker compose ps
+```
+
+```bash View logs
+# All services
+docker compose logs -f
+
+# Backend only
+docker compose logs -f backend
+
+# Database only
+docker compose logs -f db
+```
+
+```bash Health check
+curl http://localhost:3000/health
+```
+</CodeGroup>
+
+| Service | URL | Description |
+|---------|-----|-------------|
+| Backend API | http://localhost:3000 | REST API for agents and dashboard |
+| Frontend | http://localhost:4173 | React dashboard for approvals |
+| PostgreSQL | localhost:5432 | Database (not exposed in production) |
+
+<Note>
+The backend automatically runs database migrations on startup via `bun run db:migrate`. Check logs if you see "relation does not exist" errors.
+</Note>
+
+### 5. Docker Compose reference
+
+The `docker-compose.yaml` defines three services:
+
+<AccordionGroup>
+  <Accordion title="db (PostgreSQL)" icon="database">
+    ```yaml
+    db:
+      image: postgres:16-alpine
+      restart: always
+      environment:
+        POSTGRES_USER: pglocal
+        POSTGRES_PASSWORD: pglocal-pass
+        POSTGRES_DB: gaiterguard
+      ports:
+        - "5432:5432"
+      healthcheck:
+        test: ["CMD-SHELL", "pg_isready -U pglocal -d gaiterguard"]
+        interval: 5s
+        timeout: 5s
+        retries: 5
+      volumes:
+        - pgdata:/var/lib/postgresql/data
+    ```
+    
+    The database uses a persistent volume (`pgdata`) to retain data across container restarts.
+  </Accordion>
+  
+  <Accordion title="backend (Bun API)" icon="server">
+    ```yaml
+    backend:
+      build:
+        context: ./backend
+        dockerfile: Dockerfile
+      restart: always
+      ports:
+        - "3000:3000"
+      environment:
+        - DATABASE_URL=postgres://pglocal:pglocal-pass@db:5432/gaiterguard
+        - PORT=3000
+        # ... (loads from .env)
+      depends_on:
+        db:
+          condition: service_healthy
+    ```
+    
+    The backend waits for PostgreSQL to be healthy before starting. Runs migrations automatically.
+  </Accordion>
+  
+  <Accordion title="frontend (React + Vite)" icon="browser">
+    ```yaml
+    frontend:
+      build:
+        context: ./frontend
+        dockerfile: Dockerfile
+        args:
+          VITE_API_URL: http://localhost:3000
+      restart: always
+      ports:
+        - "4173:4173"
+      environment:
+        - VITE_API_URL=http://localhost:3000
+      depends_on:
+        - backend
+    ```
+    
+    The frontend is served as a static build via `vite preview`. Update `VITE_API_URL` if deploying to a different domain.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Local development
+
+**Prerequisites**: [Bun](https://bun.sh) v1.x, PostgreSQL 16+
+
+### 1. Install Bun
+
+If you don't have Bun installed:
+
+<CodeGroup>
+```bash macOS/Linux
+curl -fsSL https://bun.sh/install | bash
+```
+
+```bash Windows (WSL)
+curl -fsSL https://bun.sh/install | bash
+```
+
+```bash Verify installation
+bun --version
+```
+</CodeGroup>
+
+### 2. Set up PostgreSQL
+
+Start a local PostgreSQL instance:
+
+<CodeGroup>
+```bash macOS (Homebrew)
+brew install postgresql@16
+brew services start postgresql@16
+creatdb gaiterguard
+```
+
+```bash Ubuntu/Debian
+sudo apt install postgresql-16
+sudo systemctl start postgresql
+sudo -u postgres createdb gaiterguard
+```
+
+```bash Docker (alternative)
+docker run -d \
+  --name gaiterguard-db \
+  -e POSTGRES_USER=pglocal \
+  -e POSTGRES_PASSWORD=pglocal-pass \
+  -e POSTGRES_DB=gaiterguard \
+  -p 5432:5432 \
+  postgres:16-alpine
+```
+</CodeGroup>
+
+### 3. Install dependencies
+
+This is a monorepo with `backend/` and `frontend/` workspaces:
+
+```bash
+# Backend dependencies
+cd backend
+bun install
+
+# Frontend dependencies
+cd ../frontend
+bun install
+```
+
+### 4. Configure backend environment
+
+Create `backend/.env`:
+
+```env backend/.env
+DATABASE_URL=postgres://pglocal:pglocal-pass@localhost:5432/gaiterguard
+PORT=3000
+JWT_SECRET=dev-secret-change-in-production
+JWT_ACCESS_EXPIRY=15m
+JWT_REFRESH_EXPIRY=7d
+ENCRYPTION_SECRET=dev-encryption-secret-32-chars-minimum
+ENCRYPTION_SALT=gaiter-guard-salt-v1
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_API_KEY=sk-your-openai-api-key
+LLM_MODEL=gpt-4o-mini
+LLM_TIMEOUT_MS=10000
+RISK_THRESHOLD=0.5
+APPROVAL_EXECUTE_TTL_HOURS=1
+```
+
+<Tip>
+Bun automatically loads `.env` files — no need for `dotenv` packages.
+</Tip>
+
+### 5. Run database migrations
+
+Apply the Drizzle schema to PostgreSQL:
+
+```bash
+cd backend
+bun run db:migrate
+```
+
+This runs `drizzle-kit push` to sync your schema with the database. You'll see output like:
+
+```
+Applying migrations...
+✓ Created table "users"
+✓ Created table "services"
+✓ Created table "credentials"
+✓ Created table "agents"
+✓ Created table "approval_queue"
+```
+
+<Note>
+If you modify `backend/src/db/schema.ts`, run `bun run db:generate` to generate migrations, then `bun run db:migrate` to apply them.
+</Note>
+
+### 6. Start the backend
+
+Run the backend server with hot reload:
+
+<CodeGroup>
+```bash From backend/ directory
+bun run dev
+```
+
+```bash From project root
+bun run dev:backend
+```
+</CodeGroup>
+
+The server starts at http://localhost:3000 with hot module replacement. Changes to `src/` files auto-reload.
+
+Available backend scripts (from `backend/package.json`):
+
+```json
+{
+  "scripts": {
+    "dev": "bun --watch src/server.ts",
+    "start": "bun run db:migrate && bun src/server.ts",
+    "db:generate": "bun drizzle-kit generate",
+    "db:migrate": "bun drizzle-kit push"
+  }
+}
+```
+
+### 7. Start the frontend
+
+In a separate terminal:
+
+```bash
+cd frontend
+bun run dev
+```
+
+The Vite dev server starts at http://localhost:5173 with HMR (hot module replacement).
+
+Available frontend scripts (from `frontend/package.json`):
+
+```json
+{
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "start": "vite preview --host"
+  }
+}
+```
+
+### 8. Verify local setup
+
+Test the backend health endpoint:
+
+```bash
+curl http://localhost:3000/health
+```
+
+Expected response:
+
+```json
+{ "status": "ok" }
+```
+
+Open the frontend at http://localhost:5173 and create a test account.
+
+---
+
+## Environment variables reference
+
+### Database
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `DATABASE_URL` | PostgreSQL connection string | `postgres://user:pass@host:5432/db` |
+
+### Server
+
+| Variable | Description | Default |
+|----------|-------------|----------|
+| `PORT` | HTTP server port | `3000` |
+| `NODE_ENV` | Environment mode | `development` |
+
+### JWT Authentication
+
+| Variable | Description | Default |
+|----------|-------------|----------|
+| `JWT_SECRET` | Secret for signing JWTs | (required) |
+| `JWT_ACCESS_EXPIRY` | Access token TTL | `15m` |
+| `JWT_REFRESH_EXPIRY` | Refresh token TTL | `7d` |
+
+### Encryption
+
+| Variable | Description | Notes |
+|----------|-------------|-------|
+| `ENCRYPTION_SECRET` | AES-256-GCM encryption key | Min 32 chars |
+| `ENCRYPTION_SALT` | Salt for key derivation | Change per deployment |
+
+### LLM Risk Assessment
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `LLM_BASE_URL` | OpenAI-compatible API base URL | `https://api.openai.com/v1` |
+| `LLM_API_KEY` | API key for LLM provider | `sk-...` |
+| `LLM_MODEL` | Model identifier | `gpt-4o-mini` |
+| `LLM_TIMEOUT_MS` | Request timeout in milliseconds | `10000` |
+
+<Tip>
+You can use any OpenAI-compatible API (OpenAI, Azure OpenAI, Together AI, Ollama with `openai-compat` mode). Just change `LLM_BASE_URL` and `LLM_API_KEY`.
+</Tip>
+
+### Risk & Approval
+
+| Variable | Description | Range |
+|----------|-------------|-------|
+| `RISK_THRESHOLD` | Score at or above this triggers approval | `0.0`–`1.0` (default `0.5`) |
+| `APPROVAL_EXECUTE_TTL_HOURS` | Hours until approved requests expire | Default `1` |
+
+---
+
+## Production deployment
+
+### Recommended architecture
+
+<Steps>
+  <Step title="Use managed PostgreSQL">
+    Instead of the `db` container, use a managed PostgreSQL service (AWS RDS, Google Cloud SQL, Supabase) with automated backups and replication.
+  </Step>
+  
+  <Step title="Deploy backend with health checks">
+    Deploy the `backend` container to Kubernetes, ECS, or Fly.io. Configure health checks on `GET /health`.
+  </Step>
+  
+  <Step title="Serve frontend via CDN">
+    Build the frontend (`bun run build`) and serve static files via Cloudflare, Vercel, or S3 + CloudFront.
+  </Step>
+  
+  <Step title="Use HTTPS everywhere">
+    Terminate TLS at a load balancer (ALB, Cloudflare). Never expose unencrypted API endpoints.
+  </Step>
+  
+  <Step title="Set up secret management">
+    Store `JWT_SECRET`, `ENCRYPTION_SECRET`, and `LLM_API_KEY` in AWS Secrets Manager, HashiCorp Vault, or your platform's secret store.
+  </Step>
+</Steps>
+
+### Security checklist
+
+<AccordionGroup>
+  <Accordion title="Secrets rotation" icon="rotate">
+    - Rotate `JWT_SECRET` monthly (invalidates all sessions)
+    - Rotate `ENCRYPTION_SECRET` with data re-encryption migration
+    - Use short-lived `LLM_API_KEY` with scoped permissions
+  </Accordion>
+  
+  <Accordion title="Network isolation" icon="shield">
+    - Run backend and database in a private VPC
+    - Expose only the backend API via load balancer
+    - Block direct database access from the internet
+  </Accordion>
+  
+  <Accordion title="Monitoring" icon="chart-line">
+    - Log all approval actions (who approved what, when)
+    - Alert on failed LLM risk assessments (fallback to method heuristics)
+    - Monitor `RISK_THRESHOLD` hit rate (tune if too many/few approvals)
+  </Accordion>
+  
+  <Accordion title="Access control" icon="user-lock">
+    - Limit dashboard access to authorized personnel
+    - Use SSO/SAML for user authentication in production
+    - Audit who creates and revokes agent keys
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Database connection errors" icon="database">
+    **Error**: `ECONNREFUSED` or `relation does not exist`
+    
+    **Fix**:
+    1. Verify PostgreSQL is running: `docker compose ps` or `pg_isready`
+    2. Check `DATABASE_URL` matches your PostgreSQL credentials
+    3. Run migrations: `bun run db:migrate`
+    4. Check logs: `docker compose logs db`
+  </Accordion>
+  
+  <Accordion title="LLM timeout errors" icon="clock">
+    **Error**: `Risk assessment failed: timeout`
+    
+    **Fix**:
+    1. Increase `LLM_TIMEOUT_MS` to 20000 (20 seconds)
+    2. Verify `LLM_API_KEY` is valid and has quota
+    3. Check `LLM_BASE_URL` is reachable from the backend container
+    4. Monitor LLM provider status page
+    
+    When the LLM fails, GaiterGuard falls back to method-based heuristics (+0.3 risk boost), so DELETE/PUT requests are blocked until the LLM recovers.
+  </Accordion>
+  
+  <Accordion title="Frontend can't reach backend" icon="link-slash">
+    **Error**: `Network error` in browser console
+    
+    **Fix**:
+    1. Verify backend is running: `curl http://localhost:3000/health`
+    2. Check `VITE_API_URL` in frontend `.env` or `docker-compose.yaml`
+    3. Ensure CORS is configured (backend allows `http://localhost:5173` in dev)
+    4. For production, update `VITE_API_URL` to your backend domain
+  </Accordion>
+  
+  <Accordion title="Migrations fail on startup" icon="exclamation-triangle">
+    **Error**: `migration failed` in backend logs
+    
+    **Fix**:
+    1. Drop and recreate the database: `dropdb gaiterguard && createdb gaiterguard`
+    2. Run migrations manually: `cd backend && bun run db:migrate`
+    3. Check for schema conflicts if you modified `schema.ts`
+    4. Generate fresh migrations: `bun run db:generate`
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Test your installation with a complete proxy workflow.
+  </Card>
+  
+  <Card title="Configuration" icon="sliders" href="/guides/configuration">
+    Tune risk thresholds, approval TTLs, and LLM provider settings.
+  </Card>
+  
+  <Card title="Agent integration" icon="puzzle-piece" href="/guides/agent-integration">
+    Integrate GaiterGuard into your AI agent codebase.
+  </Card>
+  
+  <Card title="Architecture" icon="diagram-project" href="/concepts/architecture">
+    Understand how GaiterGuard works under the hood.
+  </Card>
+</CardGroup>

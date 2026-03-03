@@ -1,0 +1,360 @@
+---
+title: Configuration Reference
+description: Complete environment variable reference for GaiterGuard backend configuration
+---
+
+## Overview
+
+GaiterGuard is configured entirely through environment variables. All variables are validated at startup, and the server will refuse to start if required variables are missing or invalid.
+
+## Environment File
+
+Create a `.env` file in the `backend/` directory:
+
+```bash
+cp backend/.env.example backend/.env
+```
+
+<Warning>
+Never commit `.env` files to version control. The `.env.example` file contains safe defaults for local development only.
+</Warning>
+
+## Required Variables
+
+These variables **must** be set or the backend will not start.
+
+<ParamField path="DATABASE_URL" type="string" required>
+  PostgreSQL connection string in the format:
+  ```
+  postgres://username:password@host:port/database
+  ```
+
+  **Example:**
+  ```bash
+  DATABASE_URL=postgres://pglocal:pglocal-pass@localhost:5432/gaiterguard
+  ```
+
+  **Docker Compose:**
+  ```bash
+  DATABASE_URL=postgres://pglocal:pglocal-pass@db:5432/gaiterguard
+  ```
+
+  <Note>
+    Use the service name `db` as the host when running in Docker Compose.
+  </Note>
+</ParamField>
+
+<ParamField path="JWT_SECRET" type="string" required>
+  Secret key for signing JWT access and refresh tokens. Must be a long, random string.
+
+  **Security:** Use a cryptographically secure random string of at least 32 characters.
+
+  **Generate:**
+  ```bash
+  openssl rand -base64 32
+  ```
+
+  **Example:**
+  ```bash
+  JWT_SECRET=8vQ3m6P9xR2nL5tY7jK4wZ1bN0cH8fS6
+  ```
+
+  <Warning>
+    Never use predictable values like `"secret"` or `"dev-secret"` in production.
+  </Warning>
+</ParamField>
+
+<ParamField path="ENCRYPTION_SECRET" type="string" required>
+  Master key for encrypting service credentials in the vault. Used with AES-256-GCM.
+
+  **Security:**
+  - Must be at least 32 characters long (enforced)
+  - Use a cryptographically secure random string
+  - If changed, existing credentials become unreadable
+
+  **Generate:**
+  ```bash
+  openssl rand -base64 48 | cut -c1-32
+  ```
+
+  **Example:**
+  ```bash
+  ENCRYPTION_SECRET=a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
+  ```
+
+  <Warning>
+    Changing this value will make all existing encrypted credentials unreadable. Back up your database before rotating.
+  </Warning>
+</ParamField>
+
+<ParamField path="LLM_BASE_URL" type="string" required>
+  Base URL for the LLM API used for risk assessment. Must be OpenAI-compatible.
+
+  **Supported providers:**
+  - OpenAI: `https://api.openai.com/v1`
+  - Azure OpenAI: `https://{resource}.openai.azure.com/openai/deployments/{deployment}`
+  - Local models (Ollama): `http://localhost:11434/v1`
+  - Any OpenAI-compatible endpoint
+
+  **Example:**
+  ```bash
+  LLM_BASE_URL=https://api.openai.com/v1
+  ```
+</ParamField>
+
+<ParamField path="LLM_API_KEY" type="string" required>
+  API key for authenticating with the LLM service.
+
+  **Example:**
+  ```bash
+  LLM_API_KEY=sk-proj-abc123...
+  ```
+
+  <Note>
+    For local Ollama instances, you can use a placeholder value like `"ollama"` since authentication is not required.
+  </Note>
+</ParamField>
+
+## Optional Variables
+
+These variables have sensible defaults but can be customized.
+
+<ParamField path="PORT" type="number" default="3000">
+  Port the backend API server listens on.
+
+  **Example:**
+  ```bash
+  PORT=3000
+  ```
+</ParamField>
+
+<ParamField path="JWT_ACCESS_EXPIRY" type="string" default="15m">
+  Access token expiration time. Accepts time units: `s` (seconds), `m` (minutes), `h` (hours), `d` (days).
+
+  **Recommended:** 15 minutes to 1 hour for security.
+
+  **Examples:**
+  ```bash
+  JWT_ACCESS_EXPIRY=15m   # 15 minutes
+  JWT_ACCESS_EXPIRY=1h    # 1 hour
+  JWT_ACCESS_EXPIRY=30s   # 30 seconds (for testing)
+  ```
+</ParamField>
+
+<ParamField path="JWT_REFRESH_EXPIRY" type="string" default="7d">
+  Refresh token expiration time. Users must log in again after this period.
+
+  **Recommended:** 7 to 30 days.
+
+  **Examples:**
+  ```bash
+  JWT_REFRESH_EXPIRY=7d   # 7 days
+  JWT_REFRESH_EXPIRY=30d  # 30 days
+  JWT_REFRESH_EXPIRY=24h  # 24 hours
+  ```
+</ParamField>
+
+<ParamField path="ENCRYPTION_SALT" type="string" default="gaiter-guard-salt-v1">
+  Salt value used in credential encryption key derivation. Change this to rotate the encryption scheme.
+
+  **Example:**
+  ```bash
+  ENCRYPTION_SALT=gaiter-guard-salt-v1
+  ```
+
+  <Note>
+    Changing this requires re-encrypting all credentials. Use the same value across backend instances.
+  </Note>
+</ParamField>
+
+<ParamField path="LLM_MODEL" type="string" default="gpt-4o-mini">
+  LLM model name to use for risk assessment.
+
+  **Recommended models:**
+  - `gpt-4o-mini` - Fast, cost-effective, good accuracy
+  - `gpt-4o` - Highest accuracy, more expensive
+  - `gpt-3.5-turbo` - Faster, lower cost, slightly less accurate
+
+  **Example:**
+  ```bash
+  LLM_MODEL=gpt-4o-mini
+  ```
+</ParamField>
+
+<ParamField path="LLM_TIMEOUT_MS" type="number" default="10000">
+  Timeout for LLM API requests in milliseconds.
+
+  **Recommended:** 10000-30000 (10-30 seconds)
+
+  **Example:**
+  ```bash
+  LLM_TIMEOUT_MS=10000  # 10 seconds
+  ```
+
+  <Note>
+    If risk assessment times out, the request is rejected as a safety measure.
+  </Note>
+</ParamField>
+
+<ParamField path="RISK_THRESHOLD" type="number" default="0.5">
+  Risk score threshold (0.0 to 1.0) above which requests require human approval.
+
+  - **0.0** - Block nothing (all requests pass)
+  - **0.3** - Block high-risk operations (PUT, DELETE)
+  - **0.5** - Balanced (recommended)
+  - **0.7** - Aggressive (blocks most POST/PATCH)
+  - **1.0** - Block everything
+
+  **Example:**
+  ```bash
+  RISK_THRESHOLD=0.5
+  ```
+
+  <Tip>
+    Start with 0.5 and adjust based on false positive/negative rates. Lower values are more permissive.
+  </Tip>
+</ParamField>
+
+<ParamField path="APPROVAL_EXECUTE_TTL_HOURS" type="number" default="1">
+  Hours after approval before the execution window expires. Agents must execute approved requests within this time.
+
+  **Recommended:** 1-24 hours
+
+  **Example:**
+  ```bash
+  APPROVAL_EXECUTE_TTL_HOURS=1  # 1 hour
+  ```
+
+  <Note>
+    After expiry, the action transitions to `EXPIRED` status. Agents must resubmit via `POST /proxy`.
+  </Note>
+</ParamField>
+
+<ParamField path="NODE_ENV" type="string" default="development">
+  Node.js environment mode. Set to `production` in production deployments.
+
+  **Values:**
+  - `development` - Enables debug logging
+  - `production` - Production optimizations, reduced logging
+
+  **Example:**
+  ```bash
+  NODE_ENV=production
+  ```
+</ParamField>
+
+## Example Configurations
+
+<CodeGroup>
+
+```bash Local Development
+# Backend runs on host machine, PostgreSQL in Docker
+DATABASE_URL=postgres://pglocal:pglocal-pass@localhost:5432/gaiterguard
+PORT=3000
+JWT_SECRET=dev-secret-change-in-production
+JWT_ACCESS_EXPIRY=15m
+JWT_REFRESH_EXPIRY=7d
+ENCRYPTION_SECRET=dev-encryption-secret-32-characters
+ENCRYPTION_SALT=gaiter-guard-salt-v1
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_API_KEY=sk-proj-your-key-here
+LLM_MODEL=gpt-4o-mini
+LLM_TIMEOUT_MS=10000
+RISK_THRESHOLD=0.5
+APPROVAL_EXECUTE_TTL_HOURS=1
+```
+
+```bash Docker Compose Production
+# All services in Docker network
+DATABASE_URL=postgres://pglocal:pglocal-pass@db:5432/gaiterguard
+PORT=3000
+JWT_SECRET=8vQ3m6P9xR2nL5tY7jK4wZ1bN0cH8fS6dG9hJ2kL5mN8pQ1rT4uV7xY0zA3bC6e
+JWT_ACCESS_EXPIRY=15m
+JWT_REFRESH_EXPIRY=30d
+ENCRYPTION_SECRET=a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y5z6
+ENCRYPTION_SALT=gaiter-guard-salt-v1
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_API_KEY=sk-proj-your-key-here
+LLM_MODEL=gpt-4o-mini
+LLM_TIMEOUT_MS=15000
+RISK_THRESHOLD=0.5
+APPROVAL_EXECUTE_TTL_HOURS=2
+NODE_ENV=production
+```
+
+```bash Strict Mode (High Security)
+# Conservative risk threshold, short TTLs
+DATABASE_URL=postgres://pglocal:pglocal-pass@db:5432/gaiterguard
+PORT=3000
+JWT_SECRET=<generate-with-openssl-rand>
+JWT_ACCESS_EXPIRY=5m
+JWT_REFRESH_EXPIRY=24h
+ENCRYPTION_SECRET=<generate-with-openssl-rand>
+ENCRYPTION_SALT=gaiter-guard-salt-v1
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_API_KEY=sk-proj-your-key-here
+LLM_MODEL=gpt-4o
+LLM_TIMEOUT_MS=20000
+RISK_THRESHOLD=0.3
+APPROVAL_EXECUTE_TTL_HOURS=1
+NODE_ENV=production
+```
+
+</CodeGroup>
+
+## Validation Rules
+
+GaiterGuard validates all environment variables at startup (see `backend/src/config/env.ts:1`):
+
+- **DATABASE_URL**: Must be a valid PostgreSQL connection string
+- **JWT_SECRET**: Required, no minimum length (but use 32+ chars)
+- **ENCRYPTION_SECRET**: Must be at least 32 characters
+- **RISK_THRESHOLD**: Must be a number between 0.0 and 1.0
+- **PORT**: Must be a valid integer
+- **LLM_TIMEOUT_MS**: Must be a valid integer
+- **APPROVAL_EXECUTE_TTL_HOURS**: Must be a valid integer
+
+If validation fails, the backend will log the error and exit.
+
+## Security Best Practices
+
+<Steps>
+  <Step title="Use strong secrets">
+    Generate secrets with cryptographic tools:
+    ```bash
+    openssl rand -base64 32  # JWT_SECRET
+    openssl rand -base64 48 | cut -c1-32  # ENCRYPTION_SECRET
+    ```
+  </Step>
+
+  <Step title="Restrict file permissions">
+    Protect your `.env` file:
+    ```bash
+    chmod 600 backend/.env
+    ```
+  </Step>
+
+  <Step title="Never commit secrets">
+    Ensure `.env` is in `.gitignore`:
+    ```bash
+    echo "backend/.env" >> .gitignore
+    ```
+  </Step>
+
+  <Step title="Rotate credentials regularly">
+    - Rotate JWT_SECRET monthly
+    - Rotate ENCRYPTION_SECRET quarterly (requires re-encrypting credentials)
+    - Use secret management tools (AWS Secrets Manager, HashiCorp Vault)
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Deployment" icon="rocket" href="/guides/deployment">
+    Deploy to production with Docker Compose
+  </Card>
+  <Card title="Agent Integration" icon="robot" href="/guides/agent-integration">
+    Integrate AI agents with the gateway
+  </Card>
+</CardGroup>

@@ -1,0 +1,461 @@
+---
+title: "JWT Authentication"
+description: "Authenticate dashboard users with JWT access and refresh tokens for managing agents and services"
+---
+
+## Overview
+
+JWT (JSON Web Token) authentication is used for dashboard users to manage agents, services, and approval workflows. GaiterGuard uses a dual-token system:
+
+- **Access Token**: Short-lived (15 minutes) for API requests
+- **Refresh Token**: Long-lived (7 days) for obtaining new access tokens
+
+## Token Configuration
+
+From `/home/daytona/workspace/source/backend/src/config/env.ts:26-27`:
+
+- `JWT_ACCESS_EXPIRY`: `15m` (15 minutes)
+- `JWT_REFRESH_EXPIRY`: `7d` (7 days)
+
+## Authentication Endpoints
+
+### Register User
+
+Create a new dashboard user account.
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.gaiterguard.com/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "securePassword123"
+  }'
+```
+
+```json Response (201 Created)
+{
+  "message": "User registered",
+  "user": {
+    "id": 10,
+    "email": "user@example.com"
+  }
+}
+```
+</CodeGroup>
+
+#### Request Body
+
+<ParamField body="email" type="string" required>
+  Valid email address. Must match format: `/^[^\s@]+@[^\s@]+\.[^\s@]+$/`
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  Password with minimum 8 characters. Hashed using Argon2id (memory cost: 65536, time cost: 2).
+</ParamField>
+
+#### Response Fields
+
+<ResponseField name="user" type="object">
+  The created user record (password hash excluded)
+  
+  <ResponseField name="id" type="number">
+    Unique user identifier
+  </ResponseField>
+  
+  <ResponseField name="email" type="string">
+    User's email address
+  </ResponseField>
+</ResponseField>
+
+#### Error Responses
+
+```json Email Already Exists (409 Conflict)
+{
+  "error": "User with this email already exists",
+  "statusCode": 409
+}
+```
+
+```json Validation Error (400 Bad Request)
+{
+  "error": "Password must be at least 8 characters long",
+  "statusCode": 400
+}
+```
+
+---
+
+### Login
+
+Authenticate with email and password to receive access and refresh tokens.
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.gaiterguard.com/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "securePassword123"
+  }'
+```
+
+```json Response (200 OK)
+{
+  "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "user": {
+    "id": 10,
+    "email": "user@example.com"
+  }
+}
+```
+</CodeGroup>
+
+#### Request Body
+
+<ParamField body="email" type="string" required>
+  User's registered email address
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  User's password
+</ParamField>
+
+#### Response Fields
+
+<ResponseField name="accessToken" type="string">
+  JWT access token valid for **15 minutes**. Use in `Authorization: Bearer {token}` header.
+</ResponseField>
+
+<ResponseField name="refreshToken" type="string">
+  JWT refresh token valid for **7 days**. Use to obtain new access tokens. Stored as hashed value in database.
+</ResponseField>
+
+<ResponseField name="user" type="object">
+  Authenticated user information
+</ResponseField>
+
+#### Error Responses
+
+```json Invalid Credentials (401 Unauthorized)
+{
+  "error": "Invalid credentials",
+  "statusCode": 401
+}
+```
+
+Returned when:
+- Email doesn't exist in database
+- Password verification fails
+
+---
+
+### Refresh Access Token
+
+Exchange a valid refresh token for a new access + refresh token pair. Implements **token rotation** - the old refresh token is invalidated.
+
+<CodeGroup>
+```bash cURL
+curl -X POST https://api.gaiterguard.com/auth/refresh \
+  -H "Content-Type: application/json" \
+  -d '{
+    "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+  }'
+```
+
+```json Response (200 OK)
+{
+  "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refreshToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+</CodeGroup>
+
+#### Request Body
+
+<ParamField body="refreshToken" type="string" required>
+  Valid refresh token from login or previous refresh
+</ParamField>
+
+#### Response Fields
+
+<ResponseField name="accessToken" type="string">
+  New JWT access token valid for **15 minutes**
+</ResponseField>
+
+<ResponseField name="refreshToken" type="string">
+  New JWT refresh token valid for **7 days**. The old refresh token is deleted from database.
+</ResponseField>
+
+#### Token Rotation Flow
+
+From `/home/daytona/workspace/source/backend/src/services/auth.service.ts:135-196`:
+
+1. Verify refresh token JWT signature
+2. Extract user ID from token
+3. Query `refresh_tokens` table for matching hash
+4. **Delete old refresh token** (rotation)
+5. Generate new access + refresh token pair
+6. Store new refresh token hash in database
+7. Return new tokens
+
+#### Error Responses
+
+```json Invalid Refresh Token (401 Unauthorized)
+{
+  "error": "Invalid refresh token",
+  "statusCode": 401
+}
+```
+
+Returned when:
+- Token signature verification fails
+- Token is expired
+- Token hash not found in database
+- Token already used (due to rotation)
+
+---
+
+### Get Current User
+
+Retrieve authenticated user information.
+
+<CodeGroup>
+```bash cURL
+curl https://api.gaiterguard.com/auth/me \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+```json Response (200 OK)
+{
+  "user": {
+    "id": 10,
+    "email": "user@example.com",
+    "createdAt": "2026-01-15T10:30:00Z"
+  }
+}
+```
+</CodeGroup>
+
+#### Headers
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token format: `Bearer YOUR_ACCESS_TOKEN`
+</ParamField>
+
+#### Response Fields
+
+<ResponseField name="user" type="object">
+  Current user information
+  
+  <ResponseField name="id" type="number">
+    User ID
+  </ResponseField>
+  
+  <ResponseField name="email" type="string">
+    User email
+  </ResponseField>
+  
+  <ResponseField name="createdAt" type="string">
+    ISO 8601 timestamp of account creation
+  </ResponseField>
+</ResponseField>
+
+---
+
+## Using JWT Tokens
+
+### Making Authenticated Requests
+
+Include the access token in the `Authorization` header:
+
+```bash
+curl https://api.gaiterguard.com/agents \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+### Access Token Expiry Handling
+
+Implement automatic token refresh when access token expires:
+
+```javascript
+let accessToken = 'YOUR_ACCESS_TOKEN';
+let refreshToken = 'YOUR_REFRESH_TOKEN';
+
+async function makeAuthenticatedRequest(url) {
+  let response = await fetch(url, {
+    headers: { 'Authorization': `Bearer ${accessToken}` }
+  });
+  
+  // Access token expired - refresh it
+  if (response.status === 401) {
+    const refreshResponse = await fetch('https://api.gaiterguard.com/auth/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken })
+    });
+    
+    const tokens = await refreshResponse.json();
+    accessToken = tokens.accessToken;
+    refreshToken = tokens.refreshToken; // Store new refresh token
+    
+    // Retry original request with new token
+    response = await fetch(url, {
+      headers: { 'Authorization': `Bearer ${accessToken}` }
+    });
+  }
+  
+  return response.json();
+}
+```
+
+## JWT Token Structure
+
+### Access Token
+
+Generated by `/home/daytona/workspace/source/backend/src/utils/jwt.ts:36-44`:
+
+```json Decoded Payload
+{
+  "sub": "10",           // User ID as string
+  "iat": 1709460000,     // Issued at (Unix timestamp)
+  "exp": 1709460900      // Expires at (iat + 15 minutes)
+}
+```
+
+- Algorithm: `HS256` (HMAC-SHA256)
+- No `type` claim (distinguishes from refresh tokens)
+
+### Refresh Token
+
+Generated by `/home/daytona/workspace/source/backend/src/utils/jwt.ts:51-62`:
+
+```json Decoded Payload
+{
+  "sub": "10",           // User ID as string
+  "type": "refresh",     // Token type identifier
+  "iat": 1709460000,     // Issued at
+  "exp": 1710064800      // Expires at (iat + 7 days)
+}
+```
+
+- Algorithm: `HS256`
+- Includes `type: "refresh"` claim for validation
+
+## Authentication Middleware
+
+The `requireAuth` middleware (from `backend/src/middleware/auth.ts:29`) protects dashboard routes:
+
+1. Extract `Authorization` header
+2. Validate `Bearer ` prefix format
+3. Extract token after prefix
+4. Verify token signature and expiry using `jose` library
+5. Extract user ID from `sub` claim
+6. Return `{ userId }` for route handlers
+
+### Protected Routes
+
+All agent management endpoints require JWT authentication:
+
+- `POST /agents` - Create agent
+- `GET /agents` - List agents
+- `GET /agents/:id` - Get agent details
+- `PUT /agents/:id` - Update agent
+- `DELETE /agents/:id` - Delete agent
+- `PUT /agents/:id/services` - Update agent services
+
+## Error Responses
+
+### Missing Authorization Header
+
+```json
+{
+  "error": "Missing authorization header",
+  "statusCode": 401
+}
+```
+
+### Invalid Header Format
+
+```json
+{
+  "error": "Invalid authorization header format",
+  "statusCode": 401
+}
+```
+
+The header must start with `Bearer ` (note the space).
+
+### Invalid or Expired Token
+
+```json
+{
+  "error": "Invalid or expired token",
+  "statusCode": 401
+}
+```
+
+Returned when:
+- Token signature verification fails
+- Token is expired
+- Token is malformed
+
+## Security Features
+
+<AccordionGroup>
+  <Accordion title="Password Hashing">
+    Passwords are hashed using **Argon2id** with strong parameters:
+    - Memory cost: 65536 KB
+    - Time cost: 2 iterations
+    - Built-in salt generation
+    
+    Implementation: `backend/src/services/auth.service.ts:54-58`
+  </Accordion>
+  
+  <Accordion title="Token Rotation">
+    Refresh tokens are **single-use**. Each refresh operation:
+    - Deletes the old refresh token from database
+    - Issues a new refresh token
+    - Prevents token replay attacks
+    
+    Implementation: `backend/src/services/auth.service.ts:176`
+  </Accordion>
+  
+  <Accordion title="Token Storage">
+    - Refresh tokens stored as **hashed values** in database
+    - Access tokens are stateless (not stored)
+    - Tokens use `HS256` algorithm with secret key
+  </Accordion>
+  
+  <Accordion title="Short-Lived Access Tokens">
+    15-minute access token expiry minimizes exposure window if token is compromised. Use refresh tokens to obtain new access tokens.
+  </Accordion>
+</AccordionGroup>
+
+## Best Practices
+
+<Card title="Store Tokens Securely" icon="lock">
+  - Use secure HTTP-only cookies for web apps
+  - Store in encrypted storage on mobile
+  - Never expose tokens in URLs or logs
+</Card>
+
+<Card title="Handle Token Expiry Gracefully" icon="clock">
+  - Implement automatic refresh on 401 errors
+  - Pre-emptively refresh before expiry
+  - Clear tokens on logout
+</Card>
+
+<Card title="Use HTTPS" icon="shield">
+  Always transmit tokens over HTTPS to prevent interception
+</Card>
+
+## Implementation Reference
+
+Source code locations:
+- Auth routes: `backend/src/routes/auth.ts`
+- Auth service: `backend/src/services/auth.service.ts`
+- JWT utilities: `backend/src/utils/jwt.ts`
+- Auth middleware: `backend/src/middleware/auth.ts:29`
+- Config: `backend/src/config/env.ts`

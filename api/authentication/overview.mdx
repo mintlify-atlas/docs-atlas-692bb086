@@ -1,0 +1,66 @@
+---
+title: "Authentication Overview"
+description: "Learn about GaiterGuard's two authentication methods: Agent-Key for AI agents and JWT for dashboard users"
+---
+
+GaiterGuard provides two distinct authentication methods designed for different use cases:
+
+## Authentication Methods
+
+### Agent-Key Authentication
+
+For **AI agents** making API calls to protected services. Use the `Agent-Key` header with keys prefixed by `agt_`.
+
+- Scoped to specific services
+- Long-lived credentials
+- Managed via dashboard
+- Used for runtime agent operations
+
+[Learn more about Agent-Key authentication →](/api/authentication/agent-keys)
+
+### JWT Authentication
+
+For **dashboard users** accessing management APIs. Uses access tokens (15 minutes) and refresh tokens (7 days).
+
+- Short-lived access tokens
+- Refresh token rotation
+- Email/password login
+- Used for user dashboard operations
+
+[Learn more about JWT authentication →](/api/authentication/jwt-auth)
+
+## Quick Comparison
+
+| Feature | Agent-Key | JWT |
+|---------|-----------|-----|
+| **Primary Use** | AI agents calling protected services | Dashboard user management |
+| **Header** | `Agent-Key: agt_...` | `Authorization: Bearer ...` |
+| **Expiry** | None (revocable) | Access: 15m, Refresh: 7d |
+| **Scoping** | Per-service access control | User-level access |
+| **Creation** | Via dashboard API | Via login endpoint |
+
+## Choosing the Right Method
+
+<Card title="Use Agent-Key When" icon="robot">
+  Your AI agent needs to make API calls to services protected by GaiterGuard. Each agent can be scoped to specific services for granular access control.
+</Card>
+
+<Card title="Use JWT When" icon="user">
+  Building dashboard features or user-facing interfaces that need to manage agents, services, and approval workflows.
+</Card>
+
+## Error Responses
+
+Both authentication methods return standard error responses:
+
+```json
+{
+  "error": "Missing authorization header",
+  "statusCode": 401
+}
+```
+
+Common status codes:
+- `401 Unauthorized` - Invalid or missing credentials
+- `403 Forbidden` - Valid credentials but insufficient permissions
+- `404 Not Found` - Resource doesn't exist or user lacks access

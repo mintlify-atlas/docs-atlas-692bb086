@@ -1,0 +1,510 @@
+---
+title: Security Model
+description: Understand how GaiterGuard protects secrets using AES-256-GCM encryption, agent-key scoping, and strict trust boundaries.
+---
+
+## Overview
+
+GaiterGuard's security model is built on three pillars:
+
+1. **Encrypted vault** — secrets encrypted at rest with AES-256-GCM
+2. **Agent-key scoping** — agents can only access explicitly granted services
+3. **Trust boundaries** — gateway enforces isolation between agents and credentials
+
+<Warning>
+Agents **never receive production credentials**. The gateway injects secrets at request time and immediately forwards to the target API. Credentials are never included in responses.
+</Warning>
+
+## Encrypted Vault
+
+### Encryption Algorithm
+
+GaiterGuard uses **AES-256-GCM** (Galois/Counter Mode) for authenticated encryption:
+
+- **Key size**: 256 bits (32 bytes)
+- **IV size**: 128 bits (16 bytes, randomly generated per operation)
+- **Authentication**: GCM mode provides built-in authentication tag
+- **Key derivation**: scrypt with configurable salt
+
+### Implementation
+
+The encryption service is implemented in `backend/src/services/encryption.service.ts`:
+
+```typescript
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
+
+const ALGORITHM = 'aes-256-gcm';
+const KEY_LENGTH = 32; // 256 bits
+const IV_LENGTH = 16;  // 128 bits
+
+// Derive key from ENCRYPTION_SECRET at startup
+ENCRYPTION_KEY = scryptSync(
+  env.ENCRYPTION_SECRET,
+  env.ENCRYPTION_SALT,
+  KEY_LENGTH
+);
+```
+
+### Storage Format
+
+Encrypted credentials are stored in the `credentials` table with format:
+
+```
+iv:authTag:ciphertext
+```
+
+All components are hex-encoded. Example:
+
+```typescript
+// encryption.service.ts:39
+export function encrypt(plaintext: string): string {
+  const iv = randomBytes(IV_LENGTH);
+  const cipher = createCipheriv(ALGORITHM, ENCRYPTION_KEY, iv);
+  
+  let encrypted = cipher.update(plaintext, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  
+  const authTag = cipher.getAuthTag();
+  
+  return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted}`;
+}
+```
+
+<Note>
+**Why GCM mode?** AES-GCM provides authenticated encryption, which detects tampering. If someone modifies the ciphertext, the authentication tag verification will fail during decryption.
+</Note>
+
+### Decryption Process
+
+Decryption verifies the authentication tag to detect corruption or tampering:
+
+```typescript
+// encryption.service.ts:65
+export function decrypt(ciphertext: string): string {
+  const [ivHex, authTagHex, encrypted] = ciphertext.split(':');
+  
+  const iv = Buffer.from(ivHex, 'hex');
+  const authTag = Buffer.from(authTagHex, 'hex');
+  
+  const decipher = createDecipheriv(ALGORITHM, ENCRYPTION_KEY, iv);
+  decipher.setAuthTag(authTag);
+  
+  let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+  decrypted += decipher.final('utf8'); // Throws if auth tag invalid
+  
+  return decrypted;
+}
+```
+
+### Key Management
+
+The encryption key is derived at server startup in `server.ts:191`:
+
+```typescript
+import { initEncryption } from '@/services/encryption.service';
+
+// Initialize encryption before starting server
+initEncryption();
+```
+
+<Warning>
+**Critical**: The `ENCRYPTION_SECRET` environment variable must be at least 32 characters. If you lose this secret, all encrypted credentials are unrecoverable.
+</Warning>
+
+### Environment Variables
+
+Required configuration in `.env`:
+
+```bash
+ENCRYPTION_SECRET=your-secret-here-minimum-32-chars
+ENCRYPTION_SALT=gaiter-guard-salt-v1  # Optional, defaults to this value
+```
+
+Validation is enforced at startup in `backend/src/config/env.ts:28`:
+
+```typescript
+ENCRYPTION_SECRET: (() => {
+  const secret = getEnvVar('ENCRYPTION_SECRET');
+  if (secret.length < 32) {
+    throw new Error('ENCRYPTION_SECRET must be at least 32 characters long');
+  }
+  return secret;
+})(),
+```
+
+## Agent-Key Authentication
+
+### Key Generation
+
+Agent keys are 32-byte cryptographically random values generated via Node.js crypto:
+
+```typescript
+// utils/apikey.ts
+import { randomBytes } from 'node:crypto';
+
+export function generateApiKey(): string {
+  return 'gg_' + randomBytes(32).toString('hex'); // 64 hex chars + prefix
+}
+```
+
+Example key: `gg_a1b2c3d4e5f6...` (67 characters total)
+
+### Key Storage
+
+Only the **SHA-256 hash** of the key is stored in the database:
+
+```typescript
+// utils/apikey.ts
+import { createHash } from 'node:crypto';
+
+export function hashApiKey(apiKey: string): string {
+  return createHash('sha256').update(apiKey).digest('hex');
+}
+```
+
+The `agents` table schema (`backend/src/db/schema.ts:73`):
+
+```typescript
+export const agents = pgTable('agents', {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  userId: integer().references(() => users.id).notNull(),
+  name: varchar({ length: 255 }).notNull(),
+  keyHash: varchar({ length: 64 }).notNull().unique(), // SHA-256 hex
+  keyPrefix: varchar({ length: 16 }).notNull(),        // First 12 chars for display
+  isActive: boolean().default(true).notNull(),
+  lastUsedAt: timestamp(),
+  createdAt: timestamp().defaultNow().notNull(),
+  updatedAt: timestamp().defaultNow().notNull(),
+});
+```
+
+<Info>
+The full API key is returned **only once** when the agent is created. If lost, a new agent must be created.
+</Info>
+
+### Authentication Flow
+
+Agent authentication is handled by middleware (`backend/src/middleware/auth.ts`):
+
+1. Extract `Agent-Key` header from request
+2. Hash the provided key with SHA-256
+3. Look up agent by `keyHash` in database
+4. Verify agent is active (`isActive = true`)
+5. Update `lastUsedAt` timestamp
+
+```typescript
+// middleware/auth.ts (simplified)
+export async function requireAgentAuth(req: Request) {
+  const agentKey = req.headers.get('Agent-Key');
+  if (!agentKey) throw new AuthError('Missing Agent-Key header', 401);
+  
+  const keyHash = hashApiKey(agentKey);
+  const agent = await db.select().from(agents).where(eq(agents.keyHash, keyHash));
+  
+  if (!agent || !agent.isActive) {
+    throw new AuthError('Invalid or revoked Agent-Key', 401);
+  }
+  
+  return { agentId: agent.id, userId: agent.userId };
+}
+```
+
+## Service Scoping
+
+### Agent-Service Association
+
+Agents are granted access to specific services via the `agent_services` join table:
+
+```typescript
+// db/schema.ts:90
+export const agentServices = pgTable('agent_services', {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  agentId: integer().references(() => agents.id, { onDelete: 'cascade' }),
+  serviceId: integer().references(() => services.id, { onDelete: 'cascade' }),
+  createdAt: timestamp().defaultNow().notNull(),
+});
+```
+
+This creates a many-to-many relationship: one agent can access multiple services, and one service can be accessed by multiple agents.
+
+### Access Enforcement
+
+When an agent makes a proxy request, the gateway validates access in `proxy.service.ts:169`:
+
+```typescript
+export async function resolveService(targetUrl: string, agentId: number) {
+  const result = await db
+    .select({ service: services })
+    .from(services)
+    .innerJoin(agentServices, eq(agentServices.serviceId, services.id))
+    .where(eq(agentServices.agentId, agentId))
+    .execute();
+  
+  const matchingService = result.find((row) => 
+    targetUrl.startsWith(row.service.baseUrl)
+  );
+  
+  if (!matchingService) {
+    throw new NotFoundError('Agent does not have access to this service');
+  }
+  
+  return matchingService.service;
+}
+```
+
+<Warning>
+If an agent attempts to access a service it's not scoped to, the request is rejected with **403 Forbidden** before any credentials are touched.
+</Warning>
+
+### Updating Agent Scope
+
+Service associations can be updated via the dashboard API:
+
+```bash
+PUT /agents/:id/services
+Authorization: Bearer <jwt>
+Content-Type: application/json
+
+{
+  "serviceIds": [1, 3, 5]
+}
+```
+
+This replaces all existing associations with the new list (implemented in `agent.service.ts:297`).
+
+## Credential Injection
+
+Credentials are decrypted and injected **only at request time**, never returned to the agent.
+
+### Supported Authentication Types
+
+The gateway supports four auth types (`proxy.service.ts:212`):
+
+<Tabs>
+  <Tab title="Bearer Token">
+    ```typescript
+    case 'bearer':
+      headers['Authorization'] = `Bearer ${decryptedCreds.token}`;
+      break;
+    ```
+    
+    Requires credential key: `token`
+  </Tab>
+  
+  <Tab title="API Key">
+    ```typescript
+    case 'api_key':
+      const apiKeyValue = decryptedCreds.api_key || decryptedCreds[keyName];
+      headers['X-API-Key'] = apiKeyValue;
+      break;
+    ```
+    
+    Requires credential key: `api_key` or custom header name
+  </Tab>
+  
+  <Tab title="Basic Auth">
+    ```typescript
+    case 'basic':
+      const basicAuth = Buffer.from(
+        `${decryptedCreds.username}:${decryptedCreds.password}`
+      ).toString('base64');
+      headers['Authorization'] = `Basic ${basicAuth}`;
+      break;
+    ```
+    
+    Requires credential keys: `username`, `password`
+  </Tab>
+  
+  <Tab title="OAuth2">
+    ```typescript
+    case 'oauth2':
+      headers['Authorization'] = `Bearer ${decryptedCreds.access_token}`;
+      break;
+    ```
+    
+    Requires credential key: `access_token`
+  </Tab>
+</Tabs>
+
+### Credential Storage
+
+Credentials are stored via the dashboard API:
+
+```bash
+POST /services/:id/credentials
+Authorization: Bearer <jwt>
+Content-Type: application/json
+
+{
+  "credentials": {
+    "api_key": "sk-...",
+    "username": "admin",
+    "password": "secret"
+  }
+}
+```
+
+Each key-value pair is encrypted separately and stored in the `credentials` table.
+
+### Auth Header Stripping
+
+Before storing blocked requests in the approval queue, auth headers are stripped (`proxy.service.ts:408`):
+
+```typescript
+const safeHeaders = { ...data.headers };
+delete safeHeaders['Authorization'];
+delete safeHeaders['authorization'];
+delete safeHeaders['Agent-Key'];
+delete safeHeaders['agent-key'];
+```
+
+This prevents credentials from being persisted in the database. When an approved request is executed, credentials are re-injected fresh from the vault.
+
+## Trust Boundaries
+
+### 1. Agent ↔ Gateway Boundary
+
+**Enforced by:**
+- Agent-Key authentication (SHA-256 hashed)
+- Service scoping (agent_services table)
+- SSRF validation (hostname and path checks)
+
+**Guarantees:**
+- Agents can only access services explicitly granted
+- Agents cannot forge requests to unauthorized services
+- Agents cannot access other agents' approval actions
+
+### 2. Gateway ↔ Vault Boundary
+
+**Enforced by:**
+- AES-256-GCM encryption at rest
+- Key derivation from ENCRYPTION_SECRET
+- Runtime-only decryption (never stored decrypted)
+
+**Guarantees:**
+- Credentials are encrypted in database
+- Decryption key never leaves server memory
+- Tampering detected via authentication tag
+
+### 3. Gateway ↔ Target API Boundary
+
+**Enforced by:**
+- 30-second request timeout
+- 10MB response size limit
+- Manual redirect handling (disabled)
+- Private IP blocking
+
+**Guarantees:**
+- No SSRF attacks to internal networks
+- No unbounded memory consumption
+- No credential leakage via redirects
+
+## Attack Scenarios
+
+### Scenario 1: Agent Key Compromise
+
+**Attack:** Attacker steals an agent key
+
+**Mitigation:**
+- Agent can only access services it's scoped to
+- All requests are logged with `agentId` for audit trail
+- High-risk requests require human approval (can't be bypassed)
+- Revoke agent via dashboard (`isActive = false`)
+
+### Scenario 2: Database Breach
+
+**Attack:** Attacker gains read access to PostgreSQL database
+
+**Mitigation:**
+- Credentials are AES-256-GCM encrypted
+- Agent keys are SHA-256 hashed (not reversible)
+- Encryption key (`ENCRYPTION_SECRET`) not stored in database
+- Without encryption key, credentials are unreadable
+
+### Scenario 3: SSRF Attempt
+
+**Attack:** Agent tries to access internal network via `targetUrl`
+
+**Mitigation:**
+- Target hostname must match service `baseUrl` hostname
+- Private IP ranges blocked (127.x, 10.x, 192.168.x, etc.)
+- Localhost access blocked
+- Target path must start with service `baseUrl` path
+
+### Scenario 4: Intent Mismatch
+
+**Attack:** Agent states benign intent but sends malicious payload
+
+**Mitigation:**
+- LLM risk assessor compares intent to actual request
+- Intent integrity check flags mismatches
+- Mismatched requests blocked with 428 status
+- Human reviews full context before approval
+
+See [Risk Assessment](/concepts/risk-assessment) for the full scoring model.
+
+## Security Best Practices
+
+<AccordionGroup>
+  <Accordion title="Rotate Encryption Keys">
+    To rotate the `ENCRYPTION_SECRET`:
+    
+    1. Deploy new instance with new secret
+    2. Re-upload all service credentials via dashboard
+    3. Old instance's encrypted data becomes unreadable
+    
+    **Warning:** There is no automated key rotation. Plan for downtime.
+  </Accordion>
+  
+  <Accordion title="Audit Agent Activity">
+    All proxy requests are logged in the `proxy_requests` table:
+    
+    ```sql
+    SELECT 
+      method, 
+      target_url, 
+      intent, 
+      status_code, 
+      requested_at 
+    FROM proxy_requests 
+    WHERE agent_id = 123 
+    ORDER BY requested_at DESC;
+    ```
+  </Accordion>
+  
+  <Accordion title="Revoke Compromised Agents">
+    If an agent key is compromised:
+    
+    ```bash
+    PUT /agents/:id
+    Authorization: Bearer <jwt>
+    
+    {
+      "isActive": false
+    }
+    ```
+    
+    All subsequent requests with that key will be rejected.
+  </Accordion>
+  
+  <Accordion title="Monitor Approval Queue">
+    High volumes of risk-blocked requests may indicate:
+    
+    - Agent malfunction or misconfiguration
+    - Threshold too low (`RISK_THRESHOLD` < 0.5)
+    - LLM hallucination or overly sensitive rules
+    
+    Review the `approval_queue` table for patterns.
+  </Accordion>
+</AccordionGroup>
+
+## Related Concepts
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    See how encryption integrates with the gateway
+  </Card>
+  <Card title="Risk Assessment" icon="chart-line" href="/concepts/risk-assessment">
+    Understand intent integrity checking
+  </Card>
+</CardGroup>

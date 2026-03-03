@@ -1,0 +1,340 @@
+---
+title: 'Error Responses'
+description: 'Error response formats, status codes, and error handling in the GaiterGuard API'
+---
+
+## Error Response Format
+
+All error responses from the GaiterGuard API follow a consistent JSON structure:
+
+```json
+{
+  "error": "Error message describing what went wrong",
+  "statusCode": 400
+}
+```
+
+The `Content-Type` header is always set to `application/json` for error responses.
+
+## Common HTTP Status Codes
+
+| Status Code | Meaning | Common Causes |
+|-------------|---------|---------------|
+| `400` | Bad Request | Invalid request format, missing required fields, validation errors |
+| `401` | Unauthorized | Missing or invalid authentication credentials |
+| `403` | Forbidden | Valid credentials but insufficient permissions, SSRF prevention |
+| `404` | Not Found | Resource doesn't exist or agent doesn't have access |
+| `409` | Conflict | Duplicate idempotency key currently processing |
+| `410` | Gone | Approval expired or service no longer exists |
+| `413` | Payload Too Large | Response exceeds 10MB size limit |
+| `428` | Precondition Required | Request requires human approval due to risk assessment |
+| `500` | Internal Server Error | Unexpected server error |
+| `502` | Bad Gateway | Failed to connect to target service |
+| `504` | Gateway Timeout | Request to target service exceeded 30 second timeout |
+
+## Error Types
+
+### Authentication Errors
+
+Returned when authentication fails or credentials are invalid.
+
+**Missing Authorization Header**
+```json
+{
+  "error": "Missing authorization header",
+  "statusCode": 401
+}
+```
+
+**Invalid Authorization Format**
+```json
+{
+  "error": "Invalid authorization header format",
+  "statusCode": 401
+}
+```
+
+**Invalid or Expired Token**
+```json
+{
+  "error": "Invalid or expired token",
+  "statusCode": 401
+}
+```
+
+**Missing Agent-Key Header**
+```json
+{
+  "error": "Missing Agent-Key header",
+  "statusCode": 401
+}
+```
+
+**Invalid Agent-Key Format**
+```json
+{
+  "error": "Invalid Agent-Key format",
+  "statusCode": 401
+}
+```
+
+**Invalid Agent-Key**
+```json
+{
+  "error": "Invalid Agent-Key",
+  "statusCode": 401
+}
+```
+
+**Revoked Agent Key**
+```json
+{
+  "error": "Agent key has been revoked",
+  "statusCode": 401
+}
+```
+
+### Validation Errors
+
+Returned when request data fails schema validation.
+
+**Invalid JSON**
+```json
+{
+  "error": "Invalid JSON in request body",
+  "statusCode": 400
+}
+```
+
+**Field Validation Error**
+```json
+{
+  "error": "targetUrl: Invalid url",
+  "statusCode": 400
+}
+```
+
+**Missing Required Field**
+```json
+{
+  "error": "idempotencyKey is required for POST and PATCH requests",
+  "statusCode": 400
+}
+```
+
+<Note>
+Validation errors include the field path and specific validation message in the format: `field.path: Error message`
+</Note>
+
+### Proxy Errors
+
+Errors that occur during request proxying to target services.
+
+**SSRF Prevention - Hostname Mismatch**
+```json
+{
+  "error": "Target hostname (api.example.com) does not match service baseUrl (api.allowed.com)",
+  "statusCode": 403
+}
+```
+
+**SSRF Prevention - Path Mismatch**
+```json
+{
+  "error": "Target path must start with service baseUrl path (/v1/api)",
+  "statusCode": 403
+}
+```
+
+**SSRF Prevention - Private IP Blocked**
+```json
+{
+  "error": "Access to private IP ranges is forbidden",
+  "statusCode": 403
+}
+```
+
+**SSRF Prevention - Localhost Blocked**
+```json
+{
+  "error": "Access to localhost is forbidden",
+  "statusCode": 403
+}
+```
+
+**Invalid Protocol**
+```json
+{
+  "error": "Only HTTP and HTTPS protocols are allowed",
+  "statusCode": 400
+}
+```
+
+**Service Not Found**
+```json
+{
+  "error": "No service found matching target URL or agent does not have access",
+  "statusCode": 404
+}
+```
+
+**Missing Service Access**
+```json
+{
+  "error": "Agent does not have access to this service",
+  "statusCode": 403
+}
+```
+
+**Request Timeout**
+```json
+{
+  "error": "Request timeout (30s limit exceeded)",
+  "statusCode": 504
+}
+```
+
+**Response Size Limit**
+```json
+{
+  "error": "Response size exceeds 10MB limit",
+  "statusCode": 413
+}
+```
+
+**Gateway Error**
+```json
+{
+  "error": "Failed to forward request to api.example.com: Connection refused",
+  "statusCode": 502
+}
+```
+
+### Idempotency Errors
+
+Errors related to idempotency key processing.
+
+**Duplicate Request Processing**
+```json
+{
+  "error": "Request with this idempotency key is already being processed",
+  "statusCode": 409
+}
+```
+
+<Warning>
+When you receive a 409 error for an idempotency key, wait for the original request to complete before retrying. The cached response will be available once the original request finishes.
+</Warning>
+
+### Risk Assessment Errors
+
+Returned when a request is flagged as risky and requires human approval.
+
+**Approval Required**
+```json
+{
+  "error": "Request requires human approval",
+  "action_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "risk_score": 0.85,
+  "risk_explanation": "DELETE operation detected with high risk score",
+  "status_url": "/status/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}
+```
+
+HTTP Status: `428 Precondition Required`
+
+<Note>
+Use the `action_id` to poll for approval status at the provided `status_url` endpoint, then execute the request using `POST /proxy/execute/:actionId` once approved.
+</Note>
+
+### Approval Queue Errors
+
+**Action Not Found**
+```json
+{
+  "error": "Action not found",
+  "statusCode": 404
+}
+```
+
+**Invalid Action Status**
+```json
+{
+  "error": "Cannot execute action with status PENDING",
+  "statusCode": 409
+}
+```
+
+**Approval Expired**
+```json
+{
+  "error": "Approval has expired — resubmit request via POST /proxy",
+  "statusCode": 410
+}
+```
+
+**Service Deleted**
+```json
+{
+  "error": "Service no longer exists",
+  "statusCode": 410
+}
+```
+
+## Error Handling Best Practices
+
+### Retry Logic
+
+- **401 Unauthorized**: Do not retry. Check your authentication credentials.
+- **403 Forbidden**: Do not retry. Request is blocked by security policy.
+- **409 Conflict**: Wait and poll for idempotency key completion, then use cached response.
+- **428 Precondition Required**: Poll for approval status, then execute with `/proxy/execute/:actionId`.
+- **429 Rate Limited**: Implement exponential backoff (not currently returned but reserved).
+- **500/502/504**: Retry with exponential backoff up to 3 attempts.
+
+### Handling Idempotency Conflicts
+
+When you receive a 409 error:
+
+1. The original request is still processing
+2. Wait 1-2 seconds
+3. Retry the request with the same idempotency key
+4. The gateway will return the cached response once available
+
+### Handling Approval Required (428)
+
+When you receive a 428 error:
+
+1. Extract the `action_id` from the response
+2. Poll `GET /status/:actionId` until status is `APPROVED`
+3. Execute the approved request with `POST /proxy/execute/:actionId`
+4. If status becomes `EXPIRED`, resubmit the original request via `POST /proxy`
+
+## Error Response Headers
+
+All error responses include:
+
+```
+Content-Type: application/json
+```
+
+## Implementation Details
+
+Error responses are generated using the `errorResponse()` utility function from `utils/responses.ts:26`:
+
+```typescript
+export function errorResponse(message: string, statusCode = 500): Response {
+  return Response.json(
+    {
+      error: message,
+      statusCode,
+    },
+    {
+      status: statusCode,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+}
+```

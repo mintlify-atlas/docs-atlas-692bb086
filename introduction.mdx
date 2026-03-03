@@ -1,0 +1,136 @@
+---
+title: "Introduction to GaiterGuard"
+description: "An intercepting API gateway that enforces human-in-the-loop authorization for autonomous AI agents"
+---
+
+<img src="/images/hero.png" alt="GaiterGuard" />
+
+## What is GaiterGuard?
+
+GaiterGuard is an intercepting API gateway that enforces human-in-the-loop (HITL) authorization for autonomous AI agents. Agents never hold production credentials. High-impact actions require explicit human approval through an out-of-band dashboard. The trust boundary is enforced by the gateway — not by the agent.
+
+<Note>
+**Trust boundary principle**: Your AI agents never see real API credentials. GaiterGuard injects credentials at request time and blocks risky operations until a human approves them.
+</Note>
+
+## How it works
+
+GaiterGuard sits between your AI agents and external APIs, evaluating each request through an LLM-powered risk assessment:
+
+<Steps>
+  <Step title="Agent sends proxy request">
+    Your agent calls `POST /proxy` with an `Agent-Key`, target URL, HTTP method, and a natural language **intent** describing what it wants to do.
+  </Step>
+  
+  <Step title="LLM risk assessment">
+    GaiterGuard's risk assessor reads the API documentation, your custom rules, and the agent's intent to compute a risk score (0.0–1.0).
+  </Step>
+  
+  <Step title="Low risk: forward immediately">
+    If the score is below your threshold (e.g., 0.5), GaiterGuard injects credentials from the encrypted vault and forwards the request to the target API immediately.
+  </Step>
+  
+  <Step title="High risk: require approval">
+    If the score meets or exceeds the threshold, GaiterGuard returns `428 Risk-Blocked` with an `action_id`. The request is queued for human review.
+  </Step>
+  
+  <Step title="Human approves or denies">
+    You review the request in the dashboard, see the full context (intent, payload, API docs), and approve or deny with one click.
+  </Step>
+  
+  <Step title="Agent polls and executes">
+    The agent polls `GET /status/{action_id}` every 5–10 seconds. Once approved, it calls `POST /proxy/execute/{action_id}` to execute the request with real credentials.
+  </Step>
+</Steps>
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Secret vault" icon="lock">
+    Credentials encrypted at rest with AES-256-GCM. Never returned in API responses or exposed to agents.
+  </Card>
+  
+  <Card title="Agent-Key authentication" icon="key">
+    Scoped, revocable keys. One key per agent. Agents never see service credentials.
+  </Card>
+  
+  <Card title="LLM risk assessor" icon="shield-check">
+    Evaluates requests against API docs and custom rules (e.g., "any Stripe charge > $100 requires approval").
+  </Card>
+  
+  <Card title="Intent integrity check" icon="magnifying-glass">
+    LLM compares the agent's stated intent against the actual payload to detect mismatches or suspicious behavior.
+  </Card>
+  
+  <Card title="Approval queue" icon="list-check">
+    Dashboard shows full request context. Approve or deny with one click. All actions are logged.
+  </Card>
+  
+  <Card title="Global kill switch" icon="power-off">
+    Block an entire agent session instantly by revoking its `Agent-Key` or setting `isActive: false`.
+  </Card>
+  
+  <Card title="Idempotency" icon="repeat">
+    Duplicate requests are deduplicated via `Idempotency-Key` headers. Prevents accidental double-execution.
+  </Card>
+  
+  <Card title="TTL cleanup" icon="clock">
+    Approved-but-unexecuted requests expire automatically after a configurable window (default: 1 hour).
+  </Card>
+</CardGroup>
+
+## Tech stack
+
+GaiterGuard is built with modern, performant tools:
+
+| Layer | Technology |
+|-------|------------|
+| Backend runtime | [Bun](https://bun.sh) |
+| Backend framework | `Bun.serve()` (no Express) |
+| Database | PostgreSQL 16 |
+| ORM | Drizzle ORM |
+| Auth | JWT (access + refresh tokens) |
+| Encryption | AES-256-GCM via Web Crypto |
+| Risk assessment | OpenAI-compatible LLM (configurable) |
+| Frontend | React 19 + TanStack Router + Vite |
+| Containerization | Docker + Docker Compose |
+
+## Use cases
+
+<AccordionGroup>
+  <Accordion title="Customer support agents" icon="headset">
+    AI agents that need to refund charges, cancel subscriptions, or modify user data. Low-risk queries ("get invoice") pass through instantly. High-risk mutations ("refund $500") require approval.
+  </Accordion>
+  
+  <Accordion title="Infrastructure automation" icon="server">
+    Agents that provision cloud resources, modify DNS records, or deploy code. Safe reads ("list instances") auto-approve. Destructive operations ("delete database") require human confirmation.
+  </Accordion>
+  
+  <Accordion title="Financial operations" icon="dollar-sign">
+    Agents that interact with payment processors, accounting systems, or banking APIs. Small transactions may auto-approve based on your rules; large transfers always require approval.
+  </Accordion>
+  
+  <Accordion title="Multi-tenant SaaS tools" icon="users">
+    Agents that perform actions on behalf of multiple customers. Each service can have isolated credentials, and risky cross-tenant operations are blocked until reviewed.
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get GaiterGuard running in Docker and make your first proxied request in under 10 minutes.
+  </Card>
+  
+  <Card title="Installation" icon="download" href="/installation">
+    Detailed setup instructions for Docker, local development, and production deployment.
+  </Card>
+  
+  <Card title="Architecture" icon="diagram-project" href="/concepts/architecture">
+    Understand how GaiterGuard works under the hood: request flow, risk scoring, and approval logic.
+  </Card>
+  
+  <Card title="API Reference" icon="code" href="/api/agent/proxy">
+    Complete API documentation for agent-facing and dashboard endpoints.
+  </Card>
+</CardGroup>

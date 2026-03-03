@@ -1,0 +1,689 @@
+---
+title: Agent Integration Guide
+description: Integrate AI agents with GaiterGuard gateway - authentication, request flow, error handling, and polling pattern
+---
+
+## Overview
+
+AI agents interact with GaiterGuard through three core endpoints: `POST /proxy` for submitting requests, `GET /status/:actionId` for polling approval status, and `POST /proxy/execute/:actionId` for executing approved requests.
+
+This guide covers the complete integration flow with real code examples.
+
+## Authentication
+
+All agent requests require an `Agent-Key` header. Agent keys are provisioned through the dashboard and start with the `agt_` prefix.
+
+### Required Headers
+
+Every agent request must include:
+
+<ParamField header="Agent-Key" type="string" required>
+  The agent's API key in the format `agt_<64 hex characters>`
+
+  **Example:**
+  ```
+  Agent-Key: agt_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y5z6a7b8c9d0e1f2
+  ```
+
+  Obtained from the dashboard when creating an agent.
+</ParamField>
+
+<ParamField header="Idempotency-Key" type="string" required="for POST/PATCH">
+  Unique identifier for this request to prevent duplicate execution.
+
+  **Required for:** POST and PATCH requests
+
+  **Format:** Any unique string (UUID recommended)
+
+  **Example:**
+  ```
+  Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
+  ```
+
+  <Note>
+    If the same idempotency key is reused, the cached response from the first request is returned.
+  </Note>
+</ParamField>
+
+### Authentication Flow
+
+The gateway authenticates agents using the `Agent-Key` header (see `backend/src/middleware/auth.ts:65`):
+
+1. Extract `Agent-Key` header from request
+2. Validate format (must start with `agt_`)
+3. Hash the key using SHA-256
+4. Query `agents` table for matching key hash
+5. Verify agent is active (`isActive = true`)
+6. Update `lastUsedAt` timestamp (fire-and-forget)
+
+**Error responses:**
+- `401 Unauthorized` - Missing, invalid, or revoked Agent-Key
+- `403 Forbidden` - Agent not scoped to the requested service
+
+## Request Flow
+
+### Step 1: Submit Proxy Request
+
+Submit a request to be proxied through the gateway.
+
+**Endpoint:** `POST /proxy`
+
+**Request body:**
+
+<CodeGroup>
+```json Example Request
+{
+  "targetUrl": "https://api.stripe.com/v1/charges",
+  "method": "POST",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": "{\"amount\": 500, \"currency\": \"usd\", \"customer\": \"cus_123\"}",
+  "intent": "Charge customer $5.00 for monthly subscription renewal",
+  "idempotencyKey": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+```python Python Example
+import requests
+import json
+import uuid
+
+GATEWAY_URL = "http://localhost:3000"
+AGENT_KEY = "agt_a1b2c3d4..."
+
+response = requests.post(
+    f"{GATEWAY_URL}/proxy",
+    headers={
+        "Agent-Key": AGENT_KEY,
+        "Content-Type": "application/json",
+        "Idempotency-Key": str(uuid.uuid4())
+    },
+    json={
+        "targetUrl": "https://api.stripe.com/v1/charges",
+        "method": "POST",
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({
+            "amount": 500,
+            "currency": "usd",
+            "customer": "cus_123"
+        }),
+        "intent": "Charge customer $5.00 for subscription renewal"
+    }
+)
+
+if response.status_code == 200:
+    print("Request forwarded successfully")
+    print(response.json())
+elif response.status_code == 428:
+    print("Request requires approval")
+    action_id = response.json()["action_id"]
+    # Enter polling flow (see Step 2)
+else:
+    print(f"Error: {response.status_code}")
+    print(response.json())
+```
+
+```bash cURL Example
+curl -X POST http://localhost:3000/proxy \
+  -H "Agent-Key: agt_a1b2c3d4..." \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{
+    "targetUrl": "https://api.stripe.com/v1/charges",
+    "method": "POST",
+    "headers": {"Content-Type": "application/json"},
+    "body": "{\"amount\": 500, \"currency\": \"usd\"}",
+    "intent": "Charge customer $5.00 for subscription renewal"
+  }'
+```
+</CodeGroup>
+
+**Request fields:**
+
+<ParamField path="targetUrl" type="string" required>
+  The full URL to proxy to. Must start with the `baseUrl` of a service the agent is scoped to.
+
+  **SSRF Protection:** The gateway validates that:
+  - Hostname matches the registered service
+  - Path starts with the service's base path
+  - Target is not a private IP range
+</ParamField>
+
+<ParamField path="method" type="string" required>
+  HTTP method: `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`
+</ParamField>
+
+<ParamField path="headers" type="object">
+  Request headers to forward. Do not include authentication headers - the gateway injects credentials automatically.
+
+  **Automatically injected:**
+  - `Authorization: Bearer <token>` (for bearer/oauth2 auth)
+  - `Authorization: Basic <base64>` (for basic auth)
+  - Custom API key headers (for api_key auth)
+</ParamField>
+
+<ParamField path="body" type="string">
+  Request body as a JSON-stringified string. Omit for GET/HEAD/DELETE.
+</ParamField>
+
+<ParamField path="intent" type="string" required>
+  Plain English description of what this request does. Used by the LLM for risk assessment.
+
+  **Good intent:**
+  - "Fetch the latest 10 orders for daily reporting"
+  - "Create a new customer record for signup flow"
+  - "Charge customer $5.00 for subscription renewal"
+
+  **Bad intent:**
+  - "get data" (too vague)
+  - "Read orders" for a DELETE request (mismatch → high risk score)
+</ParamField>
+
+<ParamField path="idempotencyKey" type="string">
+  Unique request identifier. Required for POST and PATCH. Prevents duplicate execution.
+
+  <Tip>
+    The `Idempotency-Key` header takes precedence over this field if both are provided.
+  </Tip>
+</ParamField>
+
+### Response Scenarios
+
+<Tabs>
+  <Tab title="Low Risk (2xx)">
+    Request forwarded immediately and executed.
+
+    **Response:**
+    ```json
+    {
+      "id": "ch_123",
+      "amount": 500,
+      "currency": "usd",
+      "status": "succeeded"
+    }
+    ```
+
+    **Headers:**
+    - `X-Proxy-Status: forwarded`
+    - `X-Idempotency-Status: processed` (if idempotency key used)
+
+    The agent receives the upstream service's response directly.
+  </Tab>
+
+  <Tab title="High Risk (428)">
+    Request blocked for human approval.
+
+    **Response:**
+    ```json
+    {
+      "error": "Request requires human approval",
+      "action_id": "550e8400-e29b-41d4-a716-446655440000",
+      "risk_score": 0.82,
+      "risk_explanation": "DELETE operation with high destructive potential",
+      "status_url": "/status/550e8400-e29b-41d4-a716-446655440000"
+    }
+    ```
+
+    **Next step:** Enter polling flow (see Step 2)
+  </Tab>
+
+  <Tab title="Errors">
+    **401 Unauthorized**
+    ```json
+    { "error": "Missing Agent-Key header" }
+    ```
+
+    **403 Forbidden**
+    ```json
+    { "error": "Agent does not have access to this service" }
+    ```
+
+    **404 Not Found**
+    ```json
+    { "error": "No service found matching target URL" }
+    ```
+
+    **409 Conflict**
+    ```json
+    { "error": "Request with this idempotency key is already being processed" }
+    ```
+
+    **502 Bad Gateway**
+    ```json
+    { "error": "Failed to forward request to api.example.com: connection refused" }
+    ```
+
+    **504 Gateway Timeout**
+    ```json
+    { "error": "Request timeout (30s limit exceeded)" }
+    ```
+  </Tab>
+</Tabs>
+
+### Step 2: Poll for Approval
+
+When a request is blocked (HTTP 428), poll the status endpoint until a terminal state is reached.
+
+**Endpoint:** `GET /status/:actionId`
+
+**Polling pattern:**
+- Poll every 5-10 seconds
+- Continue until status is `APPROVED`, `DENIED`, `EXPIRED`, or `EXECUTED`
+- Timeout after ~10 minutes (75 polls at 8 seconds)
+
+<CodeGroup>
+```python Python Polling
+import time
+import requests
+
+GATEWAY_URL = "http://localhost:3000"
+AGENT_KEY = "agt_a1b2c3d4..."
+ACTION_ID = "550e8400-e29b-41d4-a716-446655440000"
+
+POLL_INTERVAL = 8  # seconds
+MAX_POLLS = 75
+
+for attempt in range(MAX_POLLS):
+    response = requests.get(
+        f"{GATEWAY_URL}/status/{ACTION_ID}",
+        headers={"Agent-Key": AGENT_KEY}
+    )
+
+    if response.status_code != 200:
+        print(f"Status poll error {response.status_code}")
+        time.sleep(POLL_INTERVAL)
+        continue
+
+    data = response.json()
+    status = data["status"]
+    print(f"Attempt {attempt + 1}: {status}")
+
+    if status == "PENDING":
+        time.sleep(POLL_INTERVAL)
+        continue
+
+    elif status == "APPROVED":
+        print("Approved - executing...")
+        # Proceed to Step 3
+        break
+
+    elif status == "DENIED":
+        print(f"Denied at {data.get('resolved_at')}")
+        # Handle gracefully
+        break
+
+    elif status == "EXPIRED":
+        print("Approval expired - resubmit via POST /proxy")
+        break
+
+    elif status == "EXECUTED":
+        # Already executed (concurrent poll)
+        result = data["result"]
+        print(f"Already executed: HTTP {result['status']}")
+        print(result["body"])
+        break
+
+else:
+    print("Max polls reached - giving up")
+```
+
+```bash Shell Script
+#!/usr/bin/env bash
+GATEWAY_URL="http://localhost:3000"
+AGENT_KEY="agt_a1b2c3d4..."
+ACTION_ID="550e8400-e29b-41d4-a716-446655440000"
+
+while true; do
+  RESPONSE=$(curl -s -H "Agent-Key: $AGENT_KEY" \
+    "$GATEWAY_URL/status/$ACTION_ID")
+  STATUS=$(echo "$RESPONSE" | jq -r '.status')
+
+  echo "Status: $STATUS"
+
+  case "$STATUS" in
+    PENDING)
+      echo "Waiting for approval..."
+      sleep 8
+      ;;
+    APPROVED)
+      echo "Approved - executing"
+      # Call execute endpoint (Step 3)
+      break
+      ;;
+    DENIED)
+      echo "Request denied"
+      exit 1
+      ;;
+    EXPIRED)
+      echo "Approval expired"
+      exit 1
+      ;;
+    EXECUTED)
+      echo "Already executed:"
+      echo "$RESPONSE" | jq '.result'
+      exit 0
+      ;;
+    *)
+      echo "Unknown status: $STATUS"
+      exit 1
+      ;;
+  esac
+done
+```
+</CodeGroup>
+
+**Response shapes by status:**
+
+<Tabs>
+  <Tab title="PENDING">
+    ```json
+    {
+      "status": "PENDING",
+      "action_id": "550e8400-e29b-41d4-a716-446655440000",
+      "created_at": "2026-03-03T12:34:56.789Z"
+    }
+    ```
+
+    Waiting for human review. Continue polling.
+  </Tab>
+
+  <Tab title="APPROVED">
+    ```json
+    {
+      "status": "APPROVED",
+      "action_id": "550e8400-e29b-41d4-a716-446655440000",
+      "execute_url": "/proxy/execute/550e8400-e29b-41d4-a716-446655440000"
+    }
+    ```
+
+    Human approved the request. Proceed to Step 3 to execute.
+  </Tab>
+
+  <Tab title="DENIED">
+    ```json
+    {
+      "status": "DENIED",
+      "action_id": "550e8400-e29b-41d4-a716-446655440000",
+      "resolved_at": "2026-03-03T12:45:00.000Z"
+    }
+    ```
+
+    Human denied the request. Handle gracefully (log, notify, retry).
+  </Tab>
+
+  <Tab title="EXPIRED">
+    ```json
+    {
+      "status": "EXPIRED",
+      "action_id": "550e8400-e29b-41d4-a716-446655440000"
+    }
+    ```
+
+    Approval window expired (default: 1 hour). Resubmit via `POST /proxy`.
+  </Tab>
+
+  <Tab title="EXECUTED">
+    ```json
+    {
+      "status": "EXECUTED",
+      "action_id": "550e8400-e29b-41d4-a716-446655440000",
+      "result": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": "{\"id\": \"ch_123\", \"status\": \"succeeded\"}"
+      }
+    }
+    ```
+
+    Request already executed (by concurrent process or previous poll). Read the cached result.
+  </Tab>
+</Tabs>
+
+### Step 3: Execute Approved Request
+
+Once status is `APPROVED`, execute the request.
+
+**Endpoint:** `POST /proxy/execute/:actionId`
+
+**No request body needed** - the gateway replays the original stored request with fresh credentials.
+
+<CodeGroup>
+```python Python Execute
+response = requests.post(
+    f"{GATEWAY_URL}/proxy/execute/{ACTION_ID}",
+    headers={"Agent-Key": AGENT_KEY}
+)
+
+if response.status_code in (200, 201, 202, 204):
+    print(f"Executed successfully: HTTP {response.status_code}")
+    print(response.json())
+elif response.status_code == 410:
+    print("Approval expired before execution")
+    # Resubmit via POST /proxy
+elif response.status_code == 409:
+    print(f"Cannot execute: {response.json()['error']}")
+    # Check status again
+else:
+    print(f"Execute failed: {response.status_code}")
+    print(response.json())
+```
+
+```bash cURL Execute
+curl -X POST http://localhost:3000/proxy/execute/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Agent-Key: agt_a1b2c3d4..."
+```
+</CodeGroup>
+
+**Success response:**
+
+Returns the upstream service response with header:
+```
+X-Proxy-Status: executed-approved
+```
+
+**Error responses:**
+- `409 Conflict` - Action status is not APPROVED (check current status)
+- `410 Gone` - Approval expired; resubmit via POST /proxy
+
+## Error Handling
+
+### HTTP Status Codes
+
+<ResponseField name="401 Unauthorized" type="error">
+  Missing, invalid, or revoked Agent-Key
+
+  **Action:** Verify Agent-Key is correct and agent is active
+</ResponseField>
+
+<ResponseField name="403 Forbidden" type="error">
+  Agent not scoped to the target service
+
+  **Action:** Grant service access in dashboard → Agents → Edit → Service Scope
+</ResponseField>
+
+<ResponseField name="404 Not Found" type="error">
+  - Service not found matching targetUrl
+  - Action not found (ownership check failed)
+
+  **Action:** Verify service is registered and agent is scoped to it
+</ResponseField>
+
+<ResponseField name="409 Conflict" type="error">
+  - Idempotency key conflict (request already processing)
+  - Cannot execute action with current status
+
+  **Action:** Wait for in-flight request to complete, or check action status
+</ResponseField>
+
+<ResponseField name="410 Gone" type="error">
+  Approval expired before execution
+
+  **Action:** Resubmit the original request via POST /proxy
+</ResponseField>
+
+<ResponseField name="428 Precondition Required" type="success">
+  Request blocked for human approval (not an error)
+
+  **Action:** Enter polling flow
+</ResponseField>
+
+<ResponseField name="502 Bad Gateway" type="error">
+  Upstream service returned an error
+
+  **Action:** Check upstream service health and request validity
+</ResponseField>
+
+<ResponseField name="504 Gateway Timeout" type="error">
+  Upstream request exceeded 30 second timeout
+
+  **Action:** Retry or contact service owner
+</ResponseField>
+
+### Risk Score Reference
+
+The LLM assigns a base risk score by HTTP method (see `backend/src/services/risk.service.ts:1`):
+
+| Method | Base Risk | Typical Outcome (threshold=0.5) |
+|--------|-----------|----------------------------------|
+| GET, HEAD | 0.05-0.1 | Usually passes |
+| POST | 0.3 | Passes with clear intent |
+| PATCH | 0.4 | Passes with clear intent |
+| PUT | 0.5 | Expect 428 |
+| DELETE | 0.7 | Almost always 428 |
+
+The final score is adjusted based on:
+- Intent clarity (vague intent → higher score)
+- Intent-body mismatch ("read" intent with DELETE → very high score)
+- Sensitive keywords ("delete", "destroy", "drop", etc.)
+- API documentation context (registered with service)
+
+## Complete Integration Example
+
+Full Python script with polling and execution:
+
+<CodeGroup>
+```python full_integration.py
+#!/usr/bin/env python3
+import time, json, requests, uuid
+
+GATEWAY_URL = "http://localhost:3000"
+AGENT_KEY = "agt_a1b2c3d4..."
+
+def proxy_request(target_url, method, body, intent):
+    """Submit request via POST /proxy"""
+    response = requests.post(
+        f"{GATEWAY_URL}/proxy",
+        headers={
+            "Agent-Key": AGENT_KEY,
+            "Content-Type": "application/json",
+            "Idempotency-Key": str(uuid.uuid4())
+        },
+        json={
+            "targetUrl": target_url,
+            "method": method,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps(body) if body else None,
+            "intent": intent
+        }
+    )
+
+    if response.status_code in (200, 201, 202, 204):
+        return {"status": "forwarded", "data": response.json()}
+    elif response.status_code == 428:
+        data = response.json()
+        print(f"[428] Risk blocked: {data['risk_explanation']}")
+        return {"status": "blocked", "action_id": data["action_id"]}
+    else:
+        raise Exception(f"Proxy failed: {response.status_code} {response.text}")
+
+def poll_approval(action_id, max_polls=75, interval=8):
+    """Poll GET /status/:actionId until terminal state"""
+    for attempt in range(max_polls):
+        response = requests.get(
+            f"{GATEWAY_URL}/status/{action_id}",
+            headers={"Agent-Key": AGENT_KEY}
+        )
+        data = response.json()
+        status = data["status"]
+        print(f"  Poll {attempt+1}: {status}")
+
+        if status == "PENDING":
+            time.sleep(interval)
+        elif status == "APPROVED":
+            return {"status": "approved"}
+        elif status == "DENIED":
+            return {"status": "denied"}
+        elif status == "EXPIRED":
+            return {"status": "expired"}
+        elif status == "EXECUTED":
+            return {"status": "executed", "result": data["result"]}
+        else:
+            raise Exception(f"Unknown status: {status}")
+
+    raise Exception("Max polls reached")
+
+def execute_approved(action_id):
+    """Execute via POST /proxy/execute/:actionId"""
+    response = requests.post(
+        f"{GATEWAY_URL}/proxy/execute/{action_id}",
+        headers={"Agent-Key": AGENT_KEY}
+    )
+
+    if response.status_code in (200, 201, 202, 204):
+        return response.json()
+    elif response.status_code == 410:
+        raise Exception("Approval expired before execution")
+    else:
+        raise Exception(f"Execute failed: {response.status_code} {response.text}")
+
+# Example usage
+if __name__ == "__main__":
+    # Submit a high-risk DELETE request
+    result = proxy_request(
+        target_url="https://api.example.com/v1/users/123",
+        method="DELETE",
+        body=None,
+        intent="Delete inactive test user account"
+    )
+
+    if result["status"] == "forwarded":
+        print("Request forwarded directly")
+        print(result["data"])
+
+    elif result["status"] == "blocked":
+        action_id = result["action_id"]
+        print(f"Polling for approval: {action_id}")
+
+        poll_result = poll_approval(action_id)
+
+        if poll_result["status"] == "approved":
+            print("Executing approved request...")
+            exec_result = execute_approved(action_id)
+            print("Execution result:")
+            print(exec_result)
+
+        elif poll_result["status"] == "denied":
+            print("Request denied by human")
+
+        elif poll_result["status"] == "expired":
+            print("Approval expired - resubmit if still needed")
+
+        elif poll_result["status"] == "executed":
+            print("Already executed:")
+            print(poll_result["result"])
+```
+</CodeGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Agent Skill" icon="wand-magic-sparkles" href="/guides/agent-skill">
+    Install the Claude agent skill for automatic integration
+  </Card>
+  <Card title="Configuration" icon="gear" href="/guides/configuration">
+    Tune risk threshold and approval TTL
+  </Card>
+</CardGroup>

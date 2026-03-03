@@ -1,0 +1,280 @@
+---
+title: 'POST /proxy'
+description: 'Forward agent requests through the secure gateway with credential injection'
+---
+
+## Endpoint
+
+```
+POST /proxy
+```
+
+Main proxy endpoint for agents to forward requests through the gateway. Handles authentication, validation, credential injection, risk assessment, and idempotency.
+
+## Authentication
+
+Requires `Agent-Key` header with valid agent API key.
+
+```bash
+Agent-Key: your-agent-key-here
+```
+
+## Request Headers
+
+<ParamField header="Agent-Key" type="string" required>
+  Agent API key for authentication
+</ParamField>
+
+<ParamField header="Idempotency-Key" type="string">
+  Idempotency key for request deduplication. **Required** for POST and PATCH requests. Header takes precedence over body field if both are provided.
+</ParamField>
+
+## Request Body
+
+<ParamField body="targetUrl" type="string" required>
+  Target URL to forward the request to. Must match a registered service's baseUrl and pass SSRF validation.
+  
+  Example: `https://api.github.com/repos/owner/repo/issues`
+</ParamField>
+
+<ParamField body="method" type="string" required>
+  HTTP method for the request.
+  
+  **Allowed values:** `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`
+</ParamField>
+
+<ParamField body="headers" type="object" default="{}">
+  Request headers to forward to the target service. Do not include `Authorization` or credential headers - these are injected automatically.
+  
+  Example: `{"Content-Type": "application/json", "Accept": "application/json"}`
+</ParamField>
+
+<ParamField body="body" type="string" optional>
+  Request body as a JSON string. Nullable for methods that don't require a body.
+  
+  Example: `"{\"title\": \"Bug report\", \"body\": \"Description\"}"`
+</ParamField>
+
+<ParamField body="intent" type="string" required>
+  Human-readable description of what this request is attempting to do. Used for risk assessment and audit logging.
+  
+  **Constraints:** 1-500 characters
+  
+  Example: `"Create a new GitHub issue for bug report"`
+</ParamField>
+
+<ParamField body="idempotencyKey" type="string">
+  Idempotency key for request deduplication. **Required** for POST and PATCH requests. Can be provided via header instead.
+  
+  **Constraints:** 1-255 characters
+  
+  Example: `"issue-creation-20260303-001"`
+</ParamField>
+
+## Response
+
+### Success Response (200 OK)
+
+Request was successfully forwarded and completed.
+
+<ResponseField name="status" type="number">
+  HTTP status code from the target service
+</ResponseField>
+
+<ResponseField name="headers" type="object">
+  Response headers from the target service, including:
+  - `Content-Type`: Preserved from target response
+  - `X-Proxy-Status`: Always `"forwarded"` for successful requests
+  - `X-Idempotency-Status`: `"processed"` if idempotency key was used
+</ResponseField>
+
+<ResponseField name="body" type="string">
+  Response body from the target service (as received)
+</ResponseField>
+
+### Risk-Blocked Response (428 Precondition Required)
+
+Request was blocked due to high risk score and requires human approval.
+
+<ResponseField name="error" type="string">
+  Error message: `"Request requires human approval"`
+</ResponseField>
+
+<ResponseField name="action_id" type="string">
+  Unique identifier for the approval queue entry. Use this to poll status via `GET /status/:actionId`.
+</ResponseField>
+
+<ResponseField name="risk_score" type="number">
+  Risk assessment score (0-100) that triggered the block.
+</ResponseField>
+
+<ResponseField name="risk_explanation" type="string">
+  Human-readable explanation of why the request was flagged as risky.
+</ResponseField>
+
+<ResponseField name="status_url" type="string">
+  URL to poll for approval status: `/status/:actionId`
+</ResponseField>
+
+## Error Responses
+
+<ResponseField name="401 Unauthorized">
+  Invalid or missing `Agent-Key` header
+</ResponseField>
+
+<ResponseField name="400 Bad Request">
+  - Invalid request body schema
+  - Invalid URL format
+  - Missing required `idempotencyKey` for POST/PATCH
+  - Invalid HTTP method
+</ResponseField>
+
+<ResponseField name="403 Forbidden">
+  - Target URL hostname doesn't match service baseUrl (SSRF prevention)
+  - Target URL path doesn't start with service baseUrl path
+  - Access to private IP ranges blocked
+  - Access to localhost blocked
+</ResponseField>
+
+<ResponseField name="404 Not Found">
+  No service found matching target URL, or agent doesn't have access to the service
+</ResponseField>
+
+<ResponseField name="409 Conflict">
+  Request with this idempotency key is already being processed
+</ResponseField>
+
+<ResponseField name="413 Payload Too Large">
+  Response size exceeds 10MB limit
+</ResponseField>
+
+<ResponseField name="428 Precondition Required">
+  Request blocked by risk assessment - see response body for action_id to track approval
+</ResponseField>
+
+<ResponseField name="500 Internal Server Error">
+  - No credentials found for service
+  - Failed to decrypt credentials
+  - Unsupported authentication type
+</ResponseField>
+
+<ResponseField name="502 Bad Gateway">
+  Failed to forward request to target service
+</ResponseField>
+
+<ResponseField name="504 Gateway Timeout">
+  Request timeout (30 second limit exceeded)
+</ResponseField>
+
+## Examples
+
+<CodeGroup>
+
+```bash Simple GET Request
+curl -X POST https://api.gaiterguard.com/proxy \
+  -H "Agent-Key: your-agent-key-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "targetUrl": "https://api.github.com/repos/owner/repo/issues",
+    "method": "GET",
+    "headers": {
+      "Accept": "application/json"
+    },
+    "intent": "List all issues in the repository"
+  }'
+```
+
+```bash POST with Idempotency
+curl -X POST https://api.gaiterguard.com/proxy \
+  -H "Agent-Key: your-agent-key-here" \
+  -H "Idempotency-Key: issue-creation-20260303-001" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "targetUrl": "https://api.github.com/repos/owner/repo/issues",
+    "method": "POST",
+    "headers": {
+      "Content-Type": "application/json",
+      "Accept": "application/json"
+    },
+    "body": "{\"title\": \"Bug report\", \"body\": \"Description\"}",
+    "intent": "Create a new GitHub issue for bug report"
+  }'
+```
+
+```bash Idempotency in Body
+curl -X POST https://api.gaiterguard.com/proxy \
+  -H "Agent-Key: your-agent-key-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "targetUrl": "https://api.stripe.com/v1/charges",
+    "method": "POST",
+    "headers": {
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    "body": "amount=2000&currency=usd&source=tok_visa",
+    "intent": "Create a $20 charge for customer order",
+    "idempotencyKey": "charge-order-12345"
+  }'
+```
+
+```json Success Response (200)
+{
+  "status": 201,
+  "headers": {
+    "Content-Type": "application/json",
+    "X-Proxy-Status": "forwarded",
+    "X-Idempotency-Status": "processed"
+  },
+  "body": "{\"id\": 123, \"title\": \"Bug report\", \"state\": \"open\"}"
+}
+```
+
+```json Risk-Blocked Response (428)
+{
+  "error": "Request requires human approval",
+  "action_id": "act_7f8e9d0c1b2a3456",
+  "risk_score": 85,
+  "risk_explanation": "DELETE request to production database endpoint with broad scope",
+  "status_url": "/status/act_7f8e9d0c1b2a3456"
+}
+```
+
+```json Error Response (404)
+{
+  "error": "No service found matching target URL or agent does not have access"
+}
+```
+
+</CodeGroup>
+
+## Request Flow
+
+1. **Authentication** - Validate `Agent-Key` header
+2. **Schema Validation** - Validate request body against schema
+3. **Idempotency Check** - Check for cached response (if key provided)
+4. **Service Resolution** - Find matching service and verify agent access
+5. **SSRF Validation** - Validate target URL against service baseUrl
+6. **Risk Assessment** - Evaluate request risk score
+7. **Credential Injection** - Inject service credentials based on auth type
+8. **Forward Request** - Send request to target service (30s timeout, 10MB limit)
+9. **Cache Response** - Store response for idempotency (if key provided)
+10. **Return Response** - Return target service response with proxy metadata
+
+## SSRF Protection
+
+The gateway implements multiple layers of SSRF protection:
+
+- **Hostname matching**: Target hostname must match service baseUrl hostname
+- **Path prefix validation**: Target path must start with service baseUrl path
+- **Private IP blocking**: Blocks 127.x, 10.x, 172.16-31.x, 192.168.x, 169.254.x, ::1, fc00:, fe80:
+- **Localhost blocking**: Blocks `localhost` hostname
+- **Protocol restriction**: Only `http://` and `https://` allowed
+
+## Idempotency Behavior
+
+- **Required** for POST and PATCH methods
+- Can be provided via `Idempotency-Key` header or `idempotencyKey` body field
+- Header takes precedence if both are provided
+- Cached responses are returned immediately (status 200)
+- Requests in-flight return 409 Conflict
+- Cache is scoped to agent + key + request hash (method:url:body)

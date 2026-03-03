@@ -1,0 +1,219 @@
+---
+title: 'POST /proxy/execute/:actionId'
+description: 'Execute an approved request from the approval queue'
+---
+
+## Endpoint
+
+```
+POST /proxy/execute/:actionId
+```
+
+Execute a request that has been approved by a human reviewer. This endpoint retrieves the stored request from the approval queue, injects fresh credentials, forwards it to the target service, and returns the response.
+
+## Authentication
+
+Requires `Agent-Key` header with valid agent API key.
+
+```bash
+Agent-Key: your-agent-key-here
+```
+
+## Path Parameters
+
+<ParamField path="actionId" type="string" required>
+  Unique identifier for the approved request. Obtained from the `execute_url` field when polling `GET /status/:actionId` returns `APPROVED` status.
+  
+  Example: `act_7f8e9d0c1b2a3456`
+</ParamField>
+
+## Request Body
+
+No request body required. All request parameters are retrieved from the stored approval queue entry.
+
+## Response
+
+### Success Response (200 OK)
+
+Request was successfully executed.
+
+<ResponseField name="status" type="number">
+  HTTP status code from the target service
+</ResponseField>
+
+<ResponseField name="headers" type="object">
+  Response headers from the target service, including:
+  - `Content-Type`: Preserved from target response
+  - `X-Proxy-Status`: Always `"executed-approved"` for executed requests
+</ResponseField>
+
+<ResponseField name="body" type="string">
+  Response body from the target service (as received)
+</ResponseField>
+
+## Error Responses
+
+<ResponseField name="401 Unauthorized">
+  Invalid or missing `Agent-Key` header
+</ResponseField>
+
+<ResponseField name="404 Not Found">
+  - Action not found
+  - Action belongs to a different agent (ownership check)
+</ResponseField>
+
+<ResponseField name="409 Conflict">
+  Cannot execute action with current status (e.g., still PENDING, already EXECUTED, DENIED, EXPIRED)
+</ResponseField>
+
+<ResponseField name="410 Gone">
+  - Approval has expired (TTL exceeded) - resubmit via POST /proxy
+  - Service no longer exists
+</ResponseField>
+
+<ResponseField name="413 Payload Too Large">
+  Response size exceeds 10MB limit
+</ResponseField>
+
+<ResponseField name="500 Internal Server Error">
+  - No credentials found for service
+  - Failed to decrypt credentials
+  - Unsupported authentication type
+</ResponseField>
+
+<ResponseField name="502 Bad Gateway">
+  Failed to forward request to target service
+</ResponseField>
+
+<ResponseField name="504 Gateway Timeout">
+  Request timeout (30 second limit exceeded)
+</ResponseField>
+
+## Examples
+
+<CodeGroup>
+
+```bash Execute Approved Request
+curl -X POST https://api.gaiterguard.com/proxy/execute/act_7f8e9d0c1b2a3456 \
+  -H "Agent-Key: your-agent-key-here"
+```
+
+```json Success Response (200)
+{
+  "status": 200,
+  "headers": {
+    "Content-Type": "application/json",
+    "X-Proxy-Status": "executed-approved",
+    "X-GitHub-Request-Id": "abc123"
+  },
+  "body": "{\"id\": 123, \"title\": \"Bug report\", \"state\": \"open\"}"
+}
+```
+
+```json Error Response (409)
+{
+  "error": "Cannot execute action with status DENIED"
+}
+```
+
+```json Error Response (410)
+{
+  "error": "Approval has expired — resubmit request via POST /proxy"
+}
+```
+
+</CodeGroup>
+
+## Execution Flow
+
+1. **Authentication** - Validate `Agent-Key` header
+2. **Fetch Entry** - Retrieve approval queue entry by actionId
+3. **Ownership Check** - Verify the action belongs to the requesting agent
+4. **Status Check** - Verify status is `APPROVED` (not PENDING, DENIED, EXPIRED, or EXECUTED)
+5. **TTL Check** - Verify approval hasn't expired (approvalExpiresAt)
+6. **Service Lookup** - Fetch service record for authType
+7. **Credential Injection** - Parse stored headers and inject fresh credentials from vault
+8. **Forward Request** - Send the stored request to the target service
+9. **Cache Response** - Mark as EXECUTED and store response (fire-and-forget)
+10. **Return Response** - Return target service response with `X-Proxy-Status: executed-approved`
+
+## Security Features
+
+### Fresh Credential Injection
+
+Credentials are **never stored** in the approval queue. When executing an approved request:
+
+1. Headers are stored **without** `Authorization` or `Agent-Key`
+2. At execution time, credentials are retrieved fresh from the encrypted vault
+3. Credentials are injected based on the service's `authType`
+4. This prevents credential leakage through the approval queue
+
+### Ownership Validation
+
+Only the agent that created the request can execute it:
+
+- Returns 404 for both "not found" and "wrong agent" cases
+- Prevents unauthorized execution of approved requests
+
+### Time-To-Live (TTL)
+
+Approvals have an expiration time (`approvalExpiresAt`):
+
+- If TTL expires before execution, status transitions to `EXPIRED`
+- Returns 410 Gone with instructions to resubmit via POST /proxy
+- Prevents execution of stale approvals
+
+## One-Time Execution
+
+Once executed, the action transitions to `EXECUTED` status:
+
+- Subsequent execution attempts return 409 Conflict
+- The cached response is available via `GET /status/:actionId`
+- To re-execute, submit a new request via `POST /proxy`
+
+## Complete Workflow Example
+
+```bash
+# 1. Submit a risky request
+curl -X POST https://api.gaiterguard.com/proxy \
+  -H "Agent-Key: your-agent-key-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "targetUrl": "https://api.github.com/repos/owner/repo",
+    "method": "DELETE",
+    "intent": "Delete the repository"
+  }'
+
+# Response: 428 Risk-Blocked
+{
+  "error": "Request requires human approval",
+  "action_id": "act_7f8e9d0c1b2a3456",
+  "risk_score": 95,
+  "risk_explanation": "DELETE request to repository endpoint",
+  "status_url": "/status/act_7f8e9d0c1b2a3456"
+}
+
+# 2. Poll for approval status
+curl -X GET https://api.gaiterguard.com/status/act_7f8e9d0c1b2a3456 \
+  -H "Agent-Key: your-agent-key-here"
+
+# Response: APPROVED
+{
+  "status": "APPROVED",
+  "action_id": "act_7f8e9d0c1b2a3456",
+  "execute_url": "/proxy/execute/act_7f8e9d0c1b2a3456"
+}
+
+# 3. Execute the approved request
+curl -X POST https://api.gaiterguard.com/proxy/execute/act_7f8e9d0c1b2a3456 \
+  -H "Agent-Key: your-agent-key-here"
+
+# Response: Success
+{
+  "status": 204,
+  "headers": {
+    "X-Proxy-Status": "executed-approved"
+  },
+  "body": ""
+}
+```

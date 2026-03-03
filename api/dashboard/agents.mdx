@@ -1,0 +1,679 @@
+---
+title: 'Agents'
+description: 'Manage AI agents with API keys and service access permissions'
+---
+
+<Info>All agent endpoints require authentication via Bearer token.</Info>
+
+## List agents
+
+<api>GET /agents</api>
+
+Retrieve all agents for the authenticated user.
+
+### Headers
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for authentication. Format: `Bearer <jwt>`
+</ParamField>
+
+### Response
+
+Returns an array of agent objects.
+
+<ResponseField name="agents" type="object[]">
+  <Expandable title="properties">
+    <ResponseField name="id" type="number">
+      Unique agent identifier.
+    </ResponseField>
+    <ResponseField name="userId" type="number">
+      Owner user ID.
+    </ResponseField>
+    <ResponseField name="name" type="string">
+      Agent name.
+    </ResponseField>
+    <ResponseField name="keyPrefix" type="string">
+      First 12 characters of the API key for identification.
+    </ResponseField>
+    <ResponseField name="isActive" type="boolean">
+      Whether the agent is active (can make requests).
+    </ResponseField>
+    <ResponseField name="lastUsedAt" type="string">
+      ISO 8601 timestamp of last API request. Null if never used.
+    </ResponseField>
+    <ResponseField name="services" type="object[]">
+      Array of services this agent can access.
+    </ResponseField>
+    <ResponseField name="createdAt" type="string">
+      ISO 8601 timestamp of agent creation.
+    </ResponseField>
+    <ResponseField name="updatedAt" type="string">
+      ISO 8601 timestamp of last update.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Status codes
+
+- `200` - Agents retrieved successfully
+- `401` - Unauthorized (missing or invalid token)
+- `500` - Internal server error
+
+<RequestExample>
+
+```bash cURL
+curl --request GET \
+  --url https://api.gaiterguard.com/agents \
+  --header 'Authorization: Bearer <jwt>'
+```
+
+```javascript JavaScript
+const response = await fetch('https://api.gaiterguard.com/agents', {
+  headers: {
+    'Authorization': 'Bearer <jwt>'
+  }
+});
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+response = requests.get(
+    'https://api.gaiterguard.com/agents',
+    headers={'Authorization': 'Bearer <jwt>'}
+)
+data = response.json()
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+[
+  {
+    "id": 1,
+    "userId": 1,
+    "name": "Production Agent",
+    "keyPrefix": "gg_prod_abc1",
+    "isActive": true,
+    "lastUsedAt": "2026-03-03T22:49:00.000Z",
+    "services": [
+      {
+        "id": 1,
+        "name": "GitHub API"
+      }
+    ],
+    "createdAt": "2026-03-01T10:00:00.000Z",
+    "updatedAt": "2026-03-03T22:49:00.000Z"
+  }
+]
+```
+
+</ResponseExample>
+
+---
+
+## Create agent
+
+<api>POST /agents</api>
+
+Create a new agent with an API key and service permissions.
+
+<Warning>The full API key is only shown once during creation. Store it securely.</Warning>
+
+### Headers
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for authentication. Format: `Bearer <jwt>`
+</ParamField>
+
+### Request body
+
+<ParamField body="name" type="string" required>
+  Agent name (3-100 characters).
+</ParamField>
+
+<ParamField body="serviceIds" type="number[]" required>
+  Array of service IDs this agent can access. Must contain at least one valid service ID owned by the user.
+</ParamField>
+
+### Response
+
+<ResponseField name="agent" type="object">
+  <Expandable title="properties">
+    <ResponseField name="id" type="number">
+      Unique agent identifier.
+    </ResponseField>
+    <ResponseField name="userId" type="number">
+      Owner user ID.
+    </ResponseField>
+    <ResponseField name="name" type="string">
+      Agent name.
+    </ResponseField>
+    <ResponseField name="keyPrefix" type="string">
+      First 12 characters of the API key.
+    </ResponseField>
+    <ResponseField name="isActive" type="boolean">
+      Whether the agent is active.
+    </ResponseField>
+    <ResponseField name="services" type="object[]">
+      Array of services this agent can access.
+    </ResponseField>
+    <ResponseField name="createdAt" type="string">
+      ISO 8601 timestamp of agent creation.
+    </ResponseField>
+    <ResponseField name="updatedAt" type="string">
+      ISO 8601 timestamp of last update.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="apiKey" type="string">
+  Full API key. Only returned during creation. Store securely.
+</ResponseField>
+
+### Status codes
+
+- `201` - Agent created successfully
+- `400` - Validation error (invalid request body)
+- `401` - Unauthorized (missing or invalid token)
+- `404` - One or more service IDs not found
+- `500` - Internal server error
+
+<RequestExample>
+
+```bash cURL
+curl --request POST \
+  --url https://api.gaiterguard.com/agents \
+  --header 'Authorization: Bearer <jwt>' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "name": "Production Agent",
+    "serviceIds": [1, 2]
+  }'
+```
+
+```javascript JavaScript
+const response = await fetch('https://api.gaiterguard.com/agents', {
+  method: 'POST',
+  headers: {
+    'Authorization': 'Bearer <jwt>',
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    name: 'Production Agent',
+    serviceIds: [1, 2]
+  })
+});
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+response = requests.post(
+    'https://api.gaiterguard.com/agents',
+    headers={'Authorization': 'Bearer <jwt>'},
+    json={
+        'name': 'Production Agent',
+        'serviceIds': [1, 2]
+    }
+)
+data = response.json()
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 201
+{
+  "agent": {
+    "id": 1,
+    "userId": 1,
+    "name": "Production Agent",
+    "keyPrefix": "gg_prod_abc1",
+    "isActive": true,
+    "services": [
+      {
+        "id": 1,
+        "name": "GitHub API"
+      },
+      {
+        "id": 2,
+        "name": "Stripe API"
+      }
+    ],
+    "createdAt": "2026-03-03T22:49:00.000Z",
+    "updatedAt": "2026-03-03T22:49:00.000Z"
+  },
+  "apiKey": "gg_prod_abc123def456ghi789jkl012mno345pqr678stu901vwx234yz"
+}
+```
+
+```json 400
+{
+  "error": "At least one service ID is required"
+}
+```
+
+</ResponseExample>
+
+---
+
+## Get agent
+
+<api>GET /agents/:id</api>
+
+Retrieve a single agent by ID. Ownership is verified.
+
+### Headers
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for authentication. Format: `Bearer <jwt>`
+</ParamField>
+
+### Path parameters
+
+<ParamField path="id" type="number" required>
+  Agent ID.
+</ParamField>
+
+### Response
+
+<ResponseField name="id" type="number">
+  Unique agent identifier.
+</ResponseField>
+
+<ResponseField name="userId" type="number">
+  Owner user ID.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Agent name.
+</ResponseField>
+
+<ResponseField name="keyPrefix" type="string">
+  First 12 characters of the API key.
+</ResponseField>
+
+<ResponseField name="isActive" type="boolean">
+  Whether the agent is active.
+</ResponseField>
+
+<ResponseField name="lastUsedAt" type="string">
+  ISO 8601 timestamp of last API request.
+</ResponseField>
+
+<ResponseField name="services" type="object[]">
+  Array of services this agent can access.
+</ResponseField>
+
+<ResponseField name="createdAt" type="string">
+  ISO 8601 timestamp of agent creation.
+</ResponseField>
+
+<ResponseField name="updatedAt" type="string">
+  ISO 8601 timestamp of last update.
+</ResponseField>
+
+### Status codes
+
+- `200` - Agent retrieved successfully
+- `400` - Invalid agent ID
+- `401` - Unauthorized (missing or invalid token)
+- `404` - Agent not found
+- `500` - Internal server error
+
+<RequestExample>
+
+```bash cURL
+curl --request GET \
+  --url https://api.gaiterguard.com/agents/1 \
+  --header 'Authorization: Bearer <jwt>'
+```
+
+```javascript JavaScript
+const response = await fetch('https://api.gaiterguard.com/agents/1', {
+  headers: {
+    'Authorization': 'Bearer <jwt>'
+  }
+});
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+response = requests.get(
+    'https://api.gaiterguard.com/agents/1',
+    headers={'Authorization': 'Bearer <jwt>'}
+)
+data = response.json()
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+{
+  "id": 1,
+  "userId": 1,
+  "name": "Production Agent",
+  "keyPrefix": "gg_prod_abc1",
+  "isActive": true,
+  "lastUsedAt": "2026-03-03T22:49:00.000Z",
+  "services": [
+    {
+      "id": 1,
+      "name": "GitHub API"
+    }
+  ],
+  "createdAt": "2026-03-01T10:00:00.000Z",
+  "updatedAt": "2026-03-03T22:49:00.000Z"
+}
+```
+
+```json 404
+{
+  "error": "Resource not found"
+}
+```
+
+</ResponseExample>
+
+---
+
+## Update agent
+
+<api>PUT /agents/:id</api>
+
+Update agent details (name or active status).
+
+### Headers
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for authentication. Format: `Bearer <jwt>`
+</ParamField>
+
+### Path parameters
+
+<ParamField path="id" type="number" required>
+  Agent ID.
+</ParamField>
+
+### Request body
+
+<ParamField body="name" type="string">
+  Agent name (3-100 characters). Optional.
+</ParamField>
+
+<ParamField body="isActive" type="boolean">
+  Whether the agent is active. Set to false to revoke access. Optional.
+</ParamField>
+
+<Info>At least one field must be provided for update.</Info>
+
+### Response
+
+Returns the updated agent object.
+
+### Status codes
+
+- `200` - Agent updated successfully
+- `400` - Validation error (invalid agent ID or request body)
+- `401` - Unauthorized (missing or invalid token)
+- `404` - Agent not found
+- `500` - Internal server error
+
+<RequestExample>
+
+```bash cURL
+curl --request PUT \
+  --url https://api.gaiterguard.com/agents/1 \
+  --header 'Authorization: Bearer <jwt>' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "isActive": false
+  }'
+```
+
+```javascript JavaScript
+const response = await fetch('https://api.gaiterguard.com/agents/1', {
+  method: 'PUT',
+  headers: {
+    'Authorization': 'Bearer <jwt>',
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    isActive: false
+  })
+});
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+response = requests.put(
+    'https://api.gaiterguard.com/agents/1',
+    headers={'Authorization': 'Bearer <jwt>'},
+    json={'isActive': False}
+)
+data = response.json()
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+{
+  "id": 1,
+  "userId": 1,
+  "name": "Production Agent",
+  "keyPrefix": "gg_prod_abc1",
+  "isActive": false,
+  "lastUsedAt": "2026-03-03T22:49:00.000Z",
+  "services": [
+    {
+      "id": 1,
+      "name": "GitHub API"
+    }
+  ],
+  "createdAt": "2026-03-01T10:00:00.000Z",
+  "updatedAt": "2026-03-03T23:15:00.000Z"
+}
+```
+
+</ResponseExample>
+
+---
+
+## Delete agent
+
+<api>DELETE /agents/:id</api>
+
+Delete an agent. This cascades to delete all agent-service associations.
+
+<Warning>This action is irreversible. The agent's API key will be permanently revoked.</Warning>
+
+### Headers
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for authentication. Format: `Bearer <jwt>`
+</ParamField>
+
+### Path parameters
+
+<ParamField path="id" type="number" required>
+  Agent ID.
+</ParamField>
+
+### Response
+
+<ResponseField name="message" type="string">
+  Success message confirming deletion.
+</ResponseField>
+
+### Status codes
+
+- `200` - Agent deleted successfully
+- `400` - Invalid agent ID
+- `401` - Unauthorized (missing or invalid token)
+- `404` - Agent not found
+- `500` - Internal server error
+
+<RequestExample>
+
+```bash cURL
+curl --request DELETE \
+  --url https://api.gaiterguard.com/agents/1 \
+  --header 'Authorization: Bearer <jwt>'
+```
+
+```javascript JavaScript
+const response = await fetch('https://api.gaiterguard.com/agents/1', {
+  method: 'DELETE',
+  headers: {
+    'Authorization': 'Bearer <jwt>'
+  }
+});
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+response = requests.delete(
+    'https://api.gaiterguard.com/agents/1',
+    headers={'Authorization': 'Bearer <jwt>'}
+)
+data = response.json()
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+{
+  "message": "Agent deleted"
+}
+```
+
+</ResponseExample>
+
+---
+
+## Update agent services
+
+<api>PUT /agents/:id/services</api>
+
+Update the services an agent can access. This replaces all existing service associations.
+
+<Warning>This replaces ALL service associations. Any services not included will be removed from the agent's access.</Warning>
+
+### Headers
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for authentication. Format: `Bearer <jwt>`
+</ParamField>
+
+### Path parameters
+
+<ParamField path="id" type="number" required>
+  Agent ID.
+</ParamField>
+
+### Request body
+
+<ParamField body="serviceIds" type="number[]" required>
+  Array of service IDs this agent can access. Must contain at least one valid service ID owned by the user.
+</ParamField>
+
+### Response
+
+<ResponseField name="message" type="string">
+  Success message confirming service update.
+</ResponseField>
+
+<ResponseField name="services" type="object[]">
+  Array of services this agent can now access.
+</ResponseField>
+
+### Status codes
+
+- `200` - Agent services updated successfully
+- `400` - Validation error (invalid agent ID or request body)
+- `401` - Unauthorized (missing or invalid token)
+- `404` - Agent or one or more services not found
+- `500` - Internal server error
+
+<RequestExample>
+
+```bash cURL
+curl --request PUT \
+  --url https://api.gaiterguard.com/agents/1/services \
+  --header 'Authorization: Bearer <jwt>' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "serviceIds": [1, 3]
+  }'
+```
+
+```javascript JavaScript
+const response = await fetch('https://api.gaiterguard.com/agents/1/services', {
+  method: 'PUT',
+  headers: {
+    'Authorization': 'Bearer <jwt>',
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    serviceIds: [1, 3]
+  })
+});
+const data = await response.json();
+```
+
+```python Python
+import requests
+
+response = requests.put(
+    'https://api.gaiterguard.com/agents/1/services',
+    headers={'Authorization': 'Bearer <jwt>'},
+    json={'serviceIds': [1, 3]}
+)
+data = response.json()
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json 200
+{
+  "message": "Agent services updated",
+  "services": [
+    {
+      "id": 1,
+      "name": "GitHub API"
+    },
+    {
+      "id": 3,
+      "name": "Slack API"
+    }
+  ]
+}
+```
+
+```json 400
+{
+  "error": "At least one service ID is required"
+}
+```
+
+</ResponseExample>

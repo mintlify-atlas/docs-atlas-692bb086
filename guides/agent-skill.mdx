@@ -1,0 +1,350 @@
+---
+title: Claude Agent Skill
+description: Install and use the official GaiterGuard agent skill for Claude to automate gateway integration
+---
+
+## Overview
+
+The GaiterGuard agent skill is a pre-packaged integration guide that teaches Claude how to interact with the gateway. It includes:
+
+- Complete protocol documentation (POST /proxy, polling, execute)
+- Polling script templates (Python and bash)
+- Request flow patterns and error handling
+- Risk scoring reference
+
+With this skill installed, Claude can autonomously handle the full approval workflow without manual prompting.
+
+## Installation
+
+<Steps>
+  <Step title="Locate the skill directory">
+    The skill is bundled in the GaiterGuard repository:
+    ```bash
+    ls ~/workspace/source/skill/gaiterguard-gateway/
+    ```
+
+    Contents:
+    ```
+    skill/gaiterguard-gateway/
+    ├── SKILL.md              # Main skill instructions
+    └── references/
+        └── polling-script.md  # Polling script templates
+    ```
+  </Step>
+
+  <Step title="Copy to Claude skills directory">
+    Install the skill globally for Claude:
+    ```bash
+    mkdir -p ~/.claude/skills
+    cp -r ~/workspace/source/skill/gaiterguard-gateway ~/.claude/skills/
+    ```
+
+    <Note>
+      If you're using a different AI framework, adapt the installation path to your platform's skill/tool directory.
+    </Note>
+  </Step>
+
+  <Step title="Verify installation">
+    The skill should now be available in Claude's skill registry. You can verify by asking:
+
+    ```
+    Do you have the gaiterguard-gateway skill installed?
+    ```
+  </Step>
+</Steps>
+
+## Skill Contents
+
+### SKILL.md
+
+The main skill file (`~/workspace/source/skill/gaiterguard-gateway/SKILL.md:1`) contains:
+
+- **Environment variables** required (`GATEWAY_URL`, `AGENT_KEY`)
+- **Authentication** header format
+- **Workflow overview** (submit → poll → execute)
+- **Step-by-step protocol**:
+  - POST /proxy request format
+  - 428 response handling
+  - GET /status polling loop
+  - POST /proxy/execute execution
+- **Error code reference** (401, 403, 404, 409, 410, 428, 502, 504)
+- **Intent writing guidelines** (good vs. bad examples)
+- **Risk score baseline** by HTTP method
+
+### Polling Script Template
+
+The skill includes a complete polling script template (`~/workspace/source/skill/gaiterguard-gateway/references/polling-script.md:1`) with:
+
+<CodeGroup>
+```python Python Template (excerpt)
+#!/usr/bin/env python3
+import time, json, requests
+
+GATEWAY_URL = "PLACEHOLDER_GATEWAY_URL"
+AGENT_KEY   = "PLACEHOLDER_AGENT_KEY"
+ACTION_ID   = "PLACEHOLDER_ACTION_ID"
+
+ORIGINAL_REQUEST = {
+    "targetUrl":      "PLACEHOLDER_TARGET_URL",
+    "method":         "PLACEHOLDER_METHOD",
+    "intent":         "PLACEHOLDER_INTENT",
+    "riskScore":      0.0,
+    "riskExplanation": "PLACEHOLDER_RISK_EXPLANATION",
+}
+
+POLL_INTERVAL = 8
+MAX_POLLS     = 75
+
+def poll():
+    for attempt in range(MAX_POLLS):
+        status_code, body = request("GET", f"/status/{ACTION_ID}")
+        state = body.get("status")
+
+        if state == "PENDING":
+            time.sleep(POLL_INTERVAL)
+            continue
+
+        if state == "APPROVED":
+            exec_code, exec_body = request("POST", f"/proxy/execute/{ACTION_ID}")
+            return {
+                "outcome": "executed",
+                "status": exec_code,
+                "body": exec_body,
+                "original_request": ORIGINAL_REQUEST,
+            }
+
+        if state == "DENIED":
+            return {"outcome": "denied", "original_request": ORIGINAL_REQUEST}
+
+        if state == "EXPIRED":
+            return {"outcome": "expired", "original_request": ORIGINAL_REQUEST}
+
+        # ... (EXECUTED case)
+
+    return {"outcome": "timeout", "original_request": ORIGINAL_REQUEST}
+```
+
+```bash Shell Template (excerpt)
+#!/usr/bin/env bash
+GATEWAY_URL="PLACEHOLDER_GATEWAY_URL"
+AGENT_KEY="PLACEHOLDER_AGENT_KEY"
+ACTION_ID="PLACEHOLDER_ACTION_ID"
+
+ORIGINAL_TARGET_URL="PLACEHOLDER_TARGET_URL"
+ORIGINAL_METHOD="PLACEHOLDER_METHOD"
+ORIGINAL_INTENT="PLACEHOLDER_INTENT"
+
+poll() {
+  while true; do
+    RESPONSE=$(curl -s -H "Agent-Key: $AGENT_KEY" \
+      "$GATEWAY_URL/status/$ACTION_ID")
+    STATE=$(echo "$RESPONSE" | jq -r '.status')
+
+    case "$STATE" in
+      PENDING)  echo "Pending..."; sleep 8 ;;
+      APPROVED)
+        echo "Approved — executing"
+        RESULT=$(curl -s -X POST -H "Agent-Key: $AGENT_KEY" \
+          "$GATEWAY_URL/proxy/execute/$ACTION_ID")
+        echo "$RESULT"
+        exit 0
+        ;;
+      DENIED)   echo "Denied"; exit 1 ;;
+      EXPIRED)  echo "Expired"; exit 1 ;;
+      EXECUTED) echo "Already executed"; exit 0 ;;
+    esac
+  done
+}
+
+poll
+```
+</CodeGroup>
+
+**Key features:**
+- Polls every 8 seconds for up to 75 attempts (~10 minutes)
+- Stores original request context (URL, method, intent, risk score)
+- Handles all status states (PENDING, APPROVED, DENIED, EXPIRED, EXECUTED)
+- Re-invokes agent with full context after execution
+
+## Using the Skill
+
+### Trigger Phrases
+
+The skill activates when Claude detects:
+- "call an API through the gateway"
+- "proxy a request via GaiterGuard"
+- "use Agent-Key"
+- "POST /proxy"
+- Approval polling workflows
+- Any task requiring external API calls through the gateway
+
+### Example Usage
+
+<Tabs>
+  <Tab title="Autonomous workflow">
+    **User:**
+    ```
+    Charge customer cus_123 for $50 using the Stripe API through the gateway.
+    Use Agent-Key: agt_a1b2c3...
+    Gateway URL: http://localhost:3000
+    ```
+
+    **Claude (with skill):**
+    1. Constructs POST /proxy request with proper headers
+    2. Includes clear intent: "Charge customer $50.00 for service upgrade"
+    3. Generates unique Idempotency-Key
+    4. Submits request
+    5. If 428 returned:
+       - Writes polling script with placeholders filled in
+       - Executes script
+       - Waits for approval
+       - Executes approved request
+       - Returns result with original request context
+  </Tab>
+
+  <Tab title="Manual invocation">
+    **User:**
+    ```
+    I got a 428 response from the gateway with action_id: 550e8400-...
+    The original request was DELETE /users/123.
+    Help me poll for approval.
+    ```
+
+    **Claude (with skill):**
+    1. Recognizes 428 scenario
+    2. Retrieves polling script template from skill references
+    3. Fills in placeholders (gateway URL, agent key, action ID, original request)
+    4. Writes and executes polling script
+    5. Monitors status until terminal state
+    6. If approved, executes via POST /proxy/execute/:actionId
+    7. Returns full result with original request context
+  </Tab>
+
+  <Tab title="Error recovery">
+    **User:**
+    ```
+    The gateway returned 403 Forbidden when I tried to call the Stripe API.
+    ```
+
+    **Claude (with skill):**
+    1. Consults error code reference in skill
+    2. Identifies 403 as "Agent not scoped to service"
+    3. Provides actionable guidance:
+       ```
+       The 403 error means your agent is not scoped to the Stripe service.
+
+       To fix:
+       1. Log into the GaiterGuard dashboard
+       2. Navigate to Agents → [Your Agent]
+       3. Click Edit → Service Scope
+       4. Grant access to the Stripe service
+       5. Retry your request
+       ```
+  </Tab>
+</Tabs>
+
+## Skill Metadata
+
+From `~/workspace/source/skill/gaiterguard-gateway/SKILL.md:1-10`:
+
+```yaml
+---
+name: gaiterguard-gateway
+description: >
+  Complete integration guide for AI agents making HTTP requests through the GaiterGuard API gateway.
+  Use this skill whenever an agent needs to proxy requests to external/registered services via GaiterGuard.
+  Covers Agent-Key authentication, constructing POST /proxy requests, handling risk-blocked 428 responses
+  with a procedural polling loop, executing approved requests, and all response shapes.
+  Trigger on: "call an API through the gateway", "proxy a request via GaiterGuard", "use Agent-Key",
+  "POST /proxy", approval polling workflows, or any task requiring external API calls through the gateway.
+---
+```
+
+## Environment Variables
+
+The skill requires two environment variables to be provided by the user:
+
+<ParamField path="GATEWAY_URL" type="string" required>
+  Base URL of the GaiterGuard gateway instance
+
+  **Example:**
+  ```bash
+  export GATEWAY_URL=http://localhost:3000
+  ```
+</ParamField>
+
+<ParamField path="AGENT_KEY" type="string" required>
+  The agent's API key (obtained from dashboard)
+
+  **Example:**
+  ```bash
+  export AGENT_KEY=agt_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6...
+  ```
+</ParamField>
+
+<Note>
+Claude will prompt for these values if not set when the skill is triggered.
+</Note>
+
+## Benefits
+
+<CardGroup cols={2}>
+  <Card title="Zero manual prompting" icon="robot">
+    Claude automatically constructs proper requests, headers, and polling loops without needing step-by-step instructions each session.
+  </Card>
+
+  <Card title="Error handling" icon="shield-check">
+    Built-in reference for all error codes (401, 403, 404, 409, 410, 428, 502, 504) with actionable recovery steps.
+  </Card>
+
+  <Card title="Context preservation" icon="memory">
+    Polling scripts store and pass back original request context (URL, method, intent, risk score) so the agent can resume tasks correctly.
+  </Card>
+
+  <Card title="Copy-paste templates" icon="code">
+    Ready-to-run polling scripts in Python and bash with all placeholders filled in dynamically.
+  </Card>
+</CardGroup>
+
+## Customizing the Skill
+
+You can modify the skill for your use case:
+
+<Steps>
+  <Step title="Edit SKILL.md">
+    Update `~/.claude/skills/gaiterguard-gateway/SKILL.md` to:
+    - Change default polling interval (line 38: `POLL_INTERVAL = 8`)
+    - Adjust max polls (line 39: `MAX_POLLS = 75`)
+    - Add custom error handling
+    - Include organization-specific rules
+  </Step>
+
+  <Step title="Modify polling scripts">
+    Edit `references/polling-script.md` to:
+    - Use your preferred HTTP library
+    - Change logging format
+    - Add Slack/email notifications on approval
+    - Customize agent re-invocation command
+  </Step>
+
+  <Step title="Reload skill">
+    Claude automatically picks up changes on next invocation. No restart required.
+  </Step>
+</Steps>
+
+## Skill Reference
+
+Full skill documentation: `~/workspace/source/skill/gaiterguard-gateway/SKILL.md:1`
+
+Polling templates: `~/workspace/source/skill/gaiterguard-gateway/references/polling-script.md:1`
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Agent Integration" icon="plug" href="/guides/agent-integration">
+    Manual integration guide (if not using Claude)
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/guides/configuration">
+    Configure risk threshold and approval TTL
+  </Card>
+</CardGroup>

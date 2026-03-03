@@ -1,0 +1,270 @@
+---
+title: Production Deployment
+description: Deploy GaiterGuard to production using Docker Compose with PostgreSQL and environment configuration
+---
+
+## Overview
+
+GaiterGuard is deployed using Docker Compose with three services: PostgreSQL database, backend API, and frontend dashboard. This guide covers production deployment steps.
+
+## Prerequisites
+
+- Docker and Docker Compose installed
+- At least 2GB RAM available
+- An LLM API key (OpenAI-compatible endpoint)
+
+## Quick Start
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/your-username/gaiter-guard.git
+    cd gaiter-guard
+    ```
+  </Step>
+
+  <Step title="Copy environment template">
+    ```bash
+    cp backend/.env.example backend/.env
+    ```
+  </Step>
+
+  <Step title="Configure environment variables">
+    Edit `backend/.env` with production values. See [Configuration](/guides/configuration) for all options.
+
+    **Required variables:**
+    ```bash
+    DATABASE_URL=postgres://pglocal:pglocal-pass@db:5432/gaiterguard
+    JWT_SECRET=<generate-long-random-string>
+    ENCRYPTION_SECRET=<minimum-32-characters>
+    LLM_API_KEY=<your-openai-api-key>
+    ```
+
+    <Warning>
+      Never use default secrets in production. Generate cryptographically secure random strings for `JWT_SECRET` and `ENCRYPTION_SECRET`.
+    </Warning>
+  </Step>
+
+  <Step title="Start services">
+    ```bash
+    docker compose up --build -d
+    ```
+
+    This starts:
+    - **PostgreSQL** on port 5432
+    - **Backend API** on port 3000
+    - **Frontend dashboard** on port 4173
+  </Step>
+
+  <Step title="Verify deployment">
+    Check service health:
+    ```bash
+    docker compose ps
+    docker compose logs backend
+    ```
+
+    Test the health endpoint:
+    ```bash
+    curl http://localhost:3000/health
+    ```
+  </Step>
+</Steps>
+
+## Docker Compose Configuration
+
+The `docker-compose.yaml` defines three services:
+
+<CodeGroup>
+```yaml docker-compose.yaml
+services:
+  db:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: pglocal
+      POSTGRES_PASSWORD: pglocal-pass
+      POSTGRES_DB: gaiterguard
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pglocal -d gaiterguard"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgres://pglocal:pglocal-pass@db:5432/gaiterguard
+      - PORT=3000
+      - JWT_SECRET=dev-secret-change-in-production
+      - JWT_ACCESS_EXPIRY=15m
+      - JWT_REFRESH_EXPIRY=7d
+      - ENCRYPTION_SECRET=dev-encryption-secret-32-chars-minimum-length-required
+      - ENCRYPTION_SALT=gaiter-guard-salt-v1
+      - LLM_BASE_URL=https://api.openai.com/v1
+      - LLM_API_KEY=sk-placeholder-replace-with-real-key
+      - LLM_MODEL=gpt-4o-mini
+      - LLM_TIMEOUT_MS=10000
+      - RISK_THRESHOLD=0.5
+      - APPROVAL_EXECUTE_TTL_HOURS=1
+      - NODE_ENV=production
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: http://localhost:3000
+    restart: always
+    ports:
+      - "4173:4173"
+    environment:
+      - VITE_API_URL=http://localhost:3000
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+```
+</CodeGroup>
+
+## Production Checklist
+
+<AccordionGroup>
+  <Accordion title="Security hardening">
+    - Generate strong random secrets (minimum 32 characters)
+    - Use environment files with restricted permissions (`chmod 600 .env`)
+    - Change default PostgreSQL credentials
+    - Enable TLS/HTTPS with a reverse proxy (nginx/Caddy)
+    - Set `NODE_ENV=production`
+    - Never commit `.env` files to version control
+  </Accordion>
+
+  <Accordion title="Database configuration">
+    - Use persistent volumes for PostgreSQL data
+    - Configure automated backups
+    - Monitor connection pool usage
+    - Set appropriate `max_connections` for your workload
+  </Accordion>
+
+  <Accordion title="Network setup">
+    - Run services behind a reverse proxy
+    - Configure firewall rules (only expose 80/443)
+    - Use internal Docker network for inter-service communication
+    - Set up domain with proper DNS records
+  </Accordion>
+
+  <Accordion title="Monitoring & logging">
+    - Configure log aggregation (e.g., ELK stack)
+    - Set up uptime monitoring
+    - Monitor Docker resource usage:
+      ```bash
+      docker stats
+      ```
+    - Check logs regularly:
+      ```bash
+      docker compose logs -f backend
+      ```
+  </Accordion>
+</AccordionGroup>
+
+## Updating Services
+
+To update to a new version:
+
+```bash
+# Pull latest changes
+git pull origin main
+
+# Rebuild and restart
+docker compose down
+docker compose up --build -d
+
+# Run database migrations if needed
+docker compose exec backend bun run db:migrate
+```
+
+## Backup & Restore
+
+### Database Backup
+
+```bash
+# Create backup
+docker compose exec db pg_dump -U pglocal gaiterguard > backup_$(date +%Y%m%d).sql
+
+# Automated daily backups (add to crontab)
+0 2 * * * cd /path/to/gaiter-guard && docker compose exec db pg_dump -U pglocal gaiterguard | gzip > backups/backup_$(date +\%Y\%m\%d).sql.gz
+```
+
+### Restore Database
+
+```bash
+# Stop backend to prevent writes
+docker compose stop backend
+
+# Restore from backup
+cat backup_20260303.sql | docker compose exec -T db psql -U pglocal gaiterguard
+
+# Restart services
+docker compose start backend
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Backend fails to start">
+    Check environment variables:
+    ```bash
+    docker compose logs backend | grep -i error
+    ```
+
+    Common issues:
+    - Missing required environment variables
+    - Invalid `DATABASE_URL` format
+    - `ENCRYPTION_SECRET` less than 32 characters
+    - Database not ready (check healthcheck)
+  </Accordion>
+
+  <Accordion title="Database connection errors">
+    Verify database is running:
+    ```bash
+    docker compose ps db
+    docker compose exec db pg_isready -U pglocal
+    ```
+
+    Check connection from backend:
+    ```bash
+    docker compose exec backend bun run db:check
+    ```
+  </Accordion>
+
+  <Accordion title="Port conflicts">
+    If ports are already in use, modify `docker-compose.yaml`:
+    ```yaml
+    ports:
+      - "3001:3000"  # Use 3001 instead of 3000
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="gear" href="/guides/configuration">
+    Configure environment variables and runtime options
+  </Card>
+  <Card title="Agent Integration" icon="robot" href="/guides/agent-integration">
+    Integrate AI agents with the gateway
+  </Card>
+</CardGroup>

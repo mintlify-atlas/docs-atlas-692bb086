@@ -1,0 +1,260 @@
+---
+title: 'HTTP Headers'
+description: 'Required and optional headers for GaiterGuard API requests and responses'
+---
+
+## Request Headers
+
+### Authentication Headers
+
+#### Agent-Key
+
+**Required for**: All agent-facing proxy endpoints (`POST /proxy`, `POST /proxy/execute/:actionId`)
+
+```
+Agent-Key: agt_1234567890abcdef1234567890abcdef1234567890abcdef12
+```
+
+- **Format**: Must start with `agt_` prefix followed by alphanumeric string
+- **Validation**: Checked in `middleware/auth.ts:74`
+- **Usage**: SHA-256 hashed and matched against stored `keyHash` in the `agents` table
+- **Security**: Agent key is hashed using SHA-256 before database lookup to prevent plaintext storage
+
+<Warning>
+Agent keys starting with any prefix other than `agt_` will be rejected with a 401 error.
+</Warning>
+
+**Error responses**:
+- Missing header: `401 - Missing Agent-Key header`
+- Invalid format: `401 - Invalid Agent-Key format`
+- Invalid key: `401 - Invalid Agent-Key`
+- Revoked key: `401 - Agent key has been revoked`
+
+#### Authorization
+
+**Required for**: Dashboard and user-facing endpoints (agents, services, etc.)
+
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+- **Format**: Must use Bearer token authentication
+- **Validation**: Checked in `middleware/auth.ts:31`
+- **Token Type**: JWT access token issued by `/auth/login` or `/auth/refresh`
+- **Expiration**: Tokens expire after a configured duration (verify via JWT payload)
+
+**Error responses**:
+- Missing header: `401 - Missing authorization header`
+- Invalid format: `401 - Invalid authorization header format`
+- Missing token: `401 - Missing token`
+- Invalid/expired token: `401 - Invalid or expired token`
+
+<Note>
+The Authorization header is automatically stripped from requests before storing them in the approval queue to prevent credential leakage. See `services/proxy.service.ts:409`.
+</Note>
+
+### Idempotency Headers
+
+#### Idempotency-Key
+
+**Required for**: `POST` and `PATCH` requests to `/proxy`
+
+**Optional for**: `GET`, `PUT`, `DELETE`, `HEAD`, `OPTIONS` requests
+
+```
+Idempotency-Key: order-12345-retry-1
+```
+
+- **Format**: String, 1-255 characters
+- **Scope**: Per-agent (different agents can use the same key)
+- **Behavior**: See [Idempotency](/api/reference/idempotency) for full details
+- **TTL**: Idempotency keys expire after 24 hours
+- **Precedence**: Header value takes precedence over `idempotencyKey` field in request body
+
+**Implementation**: Extracted in `routes/proxy.ts:48`
+
+```typescript
+const idempotencyKeyHeader = req.headers.get('Idempotency-Key');
+if (idempotencyKeyHeader) {
+  data.idempotencyKey = idempotencyKeyHeader;
+}
+```
+
+<Warning>
+POST and PATCH requests without an Idempotency-Key will be rejected with a 400 validation error.
+</Warning>
+
+### Content Type Headers
+
+#### Content-Type
+
+**Required for**: All requests with a request body
+
+```
+Content-Type: application/json
+```
+
+- **Supported**: `application/json` for GaiterGuard API endpoints
+- **Proxy Requests**: Any Content-Type supported by the target service (passed through)
+- **Validation**: JSON parsing errors return 400 with `Invalid JSON in request body`
+
+## Response Headers
+
+### Standard Headers
+
+#### Content-Type
+
+All responses include a Content-Type header:
+
+```
+Content-Type: application/json
+```
+
+For proxied requests, the Content-Type from the target service is passed through:
+
+```typescript
+// From routes/proxy.ts:69
+const contentType = targetHeaders['content-type'] || 'application/json';
+responseHeaders.set('Content-Type', contentType);
+```
+
+### Proxy Metadata Headers
+
+These headers are added by the GaiterGuard gateway to proxied responses.
+
+#### X-Proxy-Status
+
+Indicates how the request was processed:
+
+```
+X-Proxy-Status: forwarded
+```
+
+**Possible values**:
+- `forwarded` - Request was forwarded to target service and response returned
+- `executed-approved` - Request was executed after human approval via `/proxy/execute/:actionId`
+
+**Implementation**: Set in `routes/proxy.ts:73` and `routes/proxy.ts:218`
+
+#### X-Idempotency-Status
+
+Indicates idempotency key usage (only present if idempotency key was provided):
+
+```
+X-Idempotency-Status: processed
+```
+
+**Possible values**:
+- `processed` - Request used an idempotency key (may be cache hit or new request)
+
+<Note>
+The current implementation marks all idempotency-keyed requests as `processed`. Future versions may distinguish between `hit` (cached) and `miss` (new request).
+</Note>
+
+**Implementation**: Set in `routes/proxy.ts:81`
+
+```typescript
+if (data.idempotencyKey) {
+  responseHeaders.set('X-Idempotency-Status', 'processed');
+}
+```
+
+## Header Handling in Proxy Requests
+
+### Credential Injection
+
+When forwarding requests to target services, GaiterGuard automatically injects authentication credentials based on the service's `authType`:
+
+| Auth Type | Header Added | Source |
+|-----------|--------------|--------|
+| `bearer` | `Authorization: Bearer {token}` | `credentials.token` |
+| `api_key` | `X-API-Key: {api_key}` or custom header | `credentials.api_key` or custom key |
+| `basic` | `Authorization: Basic {base64(user:pass)}` | `credentials.username`, `credentials.password` |
+| `oauth2` | `Authorization: Bearer {access_token}` | `credentials.access_token` |
+
+**Implementation**: See `services/proxy.service.ts:212`
+
+### Header Stripping for Security
+
+When storing requests in the approval queue, sensitive headers are stripped:
+
+```typescript
+// From services/proxy.service.ts:408
+const safeHeaders = { ...data.headers };
+delete safeHeaders['Authorization'];
+delete safeHeaders['authorization'];
+delete safeHeaders['Agent-Key'];
+delete safeHeaders['agent-key'];
+```
+
+Credentials are re-injected fresh from the encrypted vault when executing approved requests.
+
+## SSRF Prevention
+
+GaiterGuard implements strict header and URL validation to prevent SSRF attacks:
+
+- Blocks requests to private IP ranges: `127.x`, `10.x`, `172.16-31.x`, `192.168.x`, `169.254.x`
+- Blocks IPv6 loopback: `::1`, `fc00:`, `fe80:`
+- Blocks localhost hostnames
+- Only allows `http://` and `https://` protocols
+- Validates target URL matches service baseUrl
+
+**Implementation**: See `services/proxy.service.ts:92`
+
+## Header Examples
+
+### Agent Proxy Request
+
+```http
+POST /proxy HTTP/1.1
+Host: api.gaiterguard.com
+Agent-Key: agt_1234567890abcdef1234567890abcdef1234567890abcdef12
+Idempotency-Key: user-create-001
+Content-Type: application/json
+
+{
+  "targetUrl": "https://api.example.com/v1/users",
+  "method": "POST",
+  "headers": {
+    "Accept": "application/json"
+  },
+  "body": "{\"name\":\"John\"}",
+  "intent": "Create new user"
+}
+```
+
+### Dashboard Request
+
+```http
+GET /agents HTTP/1.1
+Host: api.gaiterguard.com
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Accept: application/json
+```
+
+### Proxied Response
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-Proxy-Status: forwarded
+X-Idempotency-Status: processed
+
+{"id": 123, "name": "John"}
+```
+
+### Execute Approved Request
+
+```http
+POST /proxy/execute/a1b2c3d4-e5f6-7890-abcd-ef1234567890 HTTP/1.1
+Host: api.gaiterguard.com
+Agent-Key: agt_1234567890abcdef1234567890abcdef1234567890abcdef12
+```
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-Proxy-Status: executed-approved
+
+{"status": "deleted"}
+```
