@@ -84,7 +84,8 @@
             "pages": [
               "api/reference/errors",
               "api/reference/headers",
-              "api/reference/idempotency"
+              "api/reference/idempotency",
+              "api/reference/health"
             ]
           }
         ]

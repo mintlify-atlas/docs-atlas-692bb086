@@ -1,0 +1,113 @@
+---
+title: Health endpoints
+description: Liveness and readiness checks for monitoring and orchestration
+---
+
+GaiterGuard provides two health check endpoints for monitoring service availability and database connectivity.
+
+## Liveness check
+
+<api>GET /health</api>
+
+Returns a basic health status without performing any external checks. Use this endpoint for liveness probes in container orchestration.
+
+### Response
+
+<ResponseField name="status" type="string">
+  Always returns `"ok"` if the service is running
+</ResponseField>
+
+### Example
+
+```bash
+curl http://localhost:3000/health
+```
+
+```json Response
+{
+  "status": "ok"
+}
+```
+
+<Note>
+  This endpoint does not check database connectivity. It only confirms the HTTP server is running and accepting requests.
+</Note>
+
+## Readiness check
+
+<api>GET /ready</api>
+
+Performs a database connectivity check to verify the service is ready to handle requests. Use this endpoint for readiness probes in container orchestration.
+
+### Response
+
+<ResponseField name="status" type="string">
+  Returns `"ready"` when all dependencies are available
+</ResponseField>
+
+<ResponseField name="database" type="string">
+  Connection status: `"connected"` or error message
+</ResponseField>
+
+### Example
+
+```bash
+curl http://localhost:3000/ready
+```
+
+```json Success (200)
+{
+  "status": "ready",
+  "database": "connected"
+}
+```
+
+```json Failure (503)
+{
+  "error": "Database connection failed",
+  "statusCode": 503
+}
+```
+
+<Warning>
+  If the database is unavailable, this endpoint returns a 503 Service Unavailable status. Configure your orchestrator to restart or replace the service if this check fails repeatedly.
+</Warning>
+
+## Kubernetes configuration
+
+Use these endpoints in your Kubernetes deployment:
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 3000
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 2
+```
+
+## Docker Compose healthcheck
+
+```yaml
+healthcheck:
+  test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+  interval: 30s
+  timeout: 5s
+  retries: 3
+  start_period: 10s
+```
+
+<Info>
+  Both endpoints are unauthenticated and can be called without an `Agent-Key` or `Authorization` header.
+</Info>
